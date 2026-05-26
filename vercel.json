@@ -5,7 +5,7 @@
   "routes": [
     {
       "src": "/api/(.*)",
-      "dest": "https://kennethcwx-trading.railway.app/api/$1"
+      "dest": "https://kennethcwx-trading.up.railway.app/api/$1"
     },
     { "handle": "filesystem" },
     {
