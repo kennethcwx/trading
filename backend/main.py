@@ -120,7 +120,10 @@ async def refresh_cache():
 @app.get("/api/market-regime")
 async def market_regime():
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, get_market_regime)
+    result = await loop.run_in_executor(None, get_market_regime)
+    if "error" in result:
+        raise HTTPException(status_code=503, detail=result["error"])
+    return result
 
 
 @app.get("/api/portfolio")

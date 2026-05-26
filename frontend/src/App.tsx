@@ -35,8 +35,8 @@ export default function App() {
         fetchOptions(),
         fetchTrades(),
       ])
-      setRegime(r)
-      setSignals(s)
+      setRegime('error' in r ? null : r)
+      setSignals('error' in s ? null : s)
       setPortfolio(p)
       setOptions(o)
       setTrades(t.trades)
