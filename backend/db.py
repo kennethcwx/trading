@@ -27,4 +27,29 @@ def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist (
+                symbol TEXT PRIMARY KEY
+            )
+        """)
         conn.commit()
+
+
+def get_watchlist() -> list[str]:
+    conn = get_conn()
+    rows = conn.execute("SELECT symbol FROM watchlist ORDER BY symbol").fetchall()
+    conn.close()
+    if not rows:
+        from config import WATCHLIST
+        set_watchlist(list(WATCHLIST))
+        return list(WATCHLIST)
+    return [r["symbol"] for r in rows]
+
+
+def set_watchlist(symbols: list[str]) -> None:
+    conn = get_conn()
+    conn.execute("DELETE FROM watchlist")
+    for s in symbols:
+        conn.execute("INSERT INTO watchlist (symbol) VALUES (?)", (s,))
+    conn.commit()
+    conn.close()

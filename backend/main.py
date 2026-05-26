@@ -16,7 +16,7 @@ import db
 import telegram_bot
 from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import WATCHLIST, PORTFOLIO_SIZE_SGD
+from config import PORTFOLIO_SIZE_SGD
 
 logging.basicConfig(level=logging.INFO)
 
@@ -33,7 +33,7 @@ async def signal_watcher():
             sgd_to_usd = regime.get("sgd_to_usd", 0.74)
             size_mult = regime.get("new_position_size_multiplier", 1.0)
 
-            for symbol in WATCHLIST:
+            for symbol in db.get_watchlist():
                 analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
                 if not analysis:
                     continue
@@ -59,6 +59,23 @@ async def signal_watcher():
             logging.warning(f"Signal watcher error: {e}")
 
         await asyncio.sleep(5 * 60)  # check every 5 minutes
+
+
+class WatchlistUpdate(BaseModel):
+    symbols: list[str]
+
+
+@app.get("/api/watchlist")
+async def get_watchlist():
+    return {"watchlist": db.get_watchlist()}
+
+
+@app.put("/api/watchlist")
+async def update_watchlist(body: WatchlistUpdate):
+    symbols = [s.strip().upper() for s in body.symbols if s.strip()]
+    db.set_watchlist(symbols)
+    invalidate_cache()
+    return {"watchlist": symbols}
 
 
 class TradeIn(BaseModel):
@@ -101,7 +118,7 @@ async def status():
     return {
         "ibkr_connected": ibkr.is_connected(),
         "portfolio_size_sgd": PORTFOLIO_SIZE_SGD,
-        "watchlist": WATCHLIST,
+        "watchlist": db.get_watchlist(),
     }
 
 
@@ -157,7 +174,7 @@ async def signals():
     positions = await loop.run_in_executor(None, ibkr.get_portfolio)
     position_map = {p["symbol"]: p for p in positions if p["asset_type"] == "STK"}
 
-    all_symbols = list(dict.fromkeys(WATCHLIST + list(position_map.keys())))
+    all_symbols = list(dict.fromkeys(db.get_watchlist() + list(position_map.keys())))
 
     results = []
     for symbol in all_symbols:
@@ -211,7 +228,7 @@ async def options_opportunities():
     sgd_to_usd = regime.get("sgd_to_usd", 0.74)
 
     opportunities = []
-    for symbol in WATCHLIST:
+    for symbol in db.get_watchlist():
         analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
         if not analysis:
             continue

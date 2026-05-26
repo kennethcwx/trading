@@ -3,20 +3,36 @@ import { fetchMarketRegime, fetchSignals, fetchPortfolio, fetchOptions, postRefr
 import { MarketBanner } from './components/MarketBanner'
 import { ActionSummary } from './components/ActionSummary'
 import { SignalsTable } from './components/SignalsTable'
-import { PortfolioSummary } from './components/PortfolioSummary'
 import { OptionsPanel } from './components/OptionsPanel'
 import { WeeklyChecklist } from './components/WeeklyChecklist'
+import { WatchlistEditor } from './components/WatchlistEditor'
 import { TradeLog } from './components/TradeLog'
 import { PnLChart } from './components/PnLChart'
-import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, Trade } from './types'
+import type { MarketRegime, SignalsResponse, OptionsResponse, Trade } from './types'
 import { fetchTrades } from './api'
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000
 
+function marketStatus(): { label: string; color: string } {
+  const now = new Date()
+  const day = now.getUTCDay()
+  const hour = now.getUTCHours()
+  const min = now.getUTCMinutes()
+  const mins = hour * 60 + min
+  const isWeekday = day >= 1 && day <= 5
+  const openMins = 13 * 60 + 30  // 09:30 ET = 13:30 UTC
+  const closeMins = 20 * 60       // 16:00 ET = 20:00 UTC
+  const preMarket = 9 * 60        // 05:00 ET = 09:00 UTC
+
+  if (!isWeekday) return { label: 'Market Closed', color: 'text-slate-500' }
+  if (mins >= openMins && mins < closeMins) return { label: 'Market Open', color: 'text-green-400' }
+  if (mins >= preMarket && mins < openMins) return { label: 'Pre-Market', color: 'text-yellow-500' }
+  return { label: 'Market Closed', color: 'text-slate-500' }
+}
+
 export default function App() {
   const [regime, setRegime] = useState<MarketRegime | null>(null)
   const [signals, setSignals] = useState<SignalsResponse | null>(null)
-  const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null)
   const [options, setOptions] = useState<OptionsResponse | null>(null)
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
@@ -28,16 +44,14 @@ export default function App() {
     setError(null)
     try {
       if (clearCache) await postRefreshCache()
-      const [r, s, p, o, t] = await Promise.all([
+      const [r, s, o, t] = await Promise.all([
         fetchMarketRegime(),
         fetchSignals(),
-        fetchPortfolio(),
         fetchOptions(),
         fetchTrades(),
       ])
       setRegime('error' in r ? null : r)
       setSignals('error' in s ? null : s)
-      setPortfolio(p)
       setOptions(o)
       setTrades(t.trades)
       setLastRefresh(new Date())
@@ -54,7 +68,7 @@ export default function App() {
     return () => clearInterval(interval)
   }, [refresh])
 
-  const ibkrConnected = portfolio?.ibkr_connected ?? false
+  const status = marketStatus()
 
   return (
     <div className="min-h-screen bg-[#0f1117] text-slate-200">
@@ -65,8 +79,8 @@ export default function App() {
           <span className="text-xs bg-slate-800 text-slate-500 px-2 py-0.5 rounded border border-slate-700">PAPER</span>
         </div>
         <div className="flex items-center gap-2 sm:gap-4">
-          <span className={`text-xs ${ibkrConnected ? 'text-green-400' : 'text-yellow-600'} hidden sm:inline`}>
-            {ibkrConnected ? '● IBKR Connected' : '● IBKR Offline'}
+          <span className={`text-xs font-medium ${status.color} hidden sm:inline`}>
+            ● {status.label}
           </span>
           {lastRefresh && (
             <span className="text-xs text-slate-600 hidden md:block">
@@ -94,13 +108,10 @@ export default function App() {
       {regime && <MarketBanner regime={regime} />}
 
       <div className="p-3 sm:p-6 space-y-4 sm:space-y-5 max-w-screen-2xl mx-auto">
-        {/* Portfolio */}
-        {portfolio && <PortfolioSummary portfolio={portfolio} onReconnect={() => void refresh()} />}
-
-        {/* Action summary — most important on mobile */}
+        {/* Action summary */}
         {signals && <ActionSummary signals={signals} />}
 
-        {/* Signals + Checklist */}
+        {/* Signals + right column */}
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 sm:gap-5">
           <div className="xl:col-span-2">
             {signals
@@ -108,8 +119,9 @@ export default function App() {
               : !loading && <div className="bg-[#1a1d2e] rounded-lg border border-slate-800 p-6 text-slate-500 text-xs">No signal data</div>
             }
           </div>
-          <div>
+          <div className="space-y-4 sm:space-y-5">
             <WeeklyChecklist />
+            <WatchlistEditor onSave={() => void refresh()} />
           </div>
         </div>
 

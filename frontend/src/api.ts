@@ -1,4 +1,4 @@
-import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, TradesResponse } from './types'
+import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, TradesResponse, WatchlistResponse } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? ''
 
@@ -48,4 +48,14 @@ export async function closeTrade(id: number, data: { exit_date: string; exit_pri
 
 export async function deleteTrade(id: number) {
   await apiFetch(`/trades/${id}`, { method: 'DELETE' })
+}
+
+export const fetchWatchlist = () => get<WatchlistResponse>('/watchlist')
+
+export async function updateWatchlist(symbols: string[]) {
+  await apiFetch('/watchlist', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbols }),
+  })
 }

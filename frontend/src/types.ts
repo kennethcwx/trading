@@ -160,3 +160,7 @@ export interface Trade {
 export interface TradesResponse {
   trades: Trade[]
 }
+
+export interface WatchlistResponse {
+  watchlist: string[]
+}
