@@ -1,5 +1,11 @@
 {
   "installCommand": "cd frontend && npm install",
   "buildCommand": "cd frontend && npm run build",
-  "outputDirectory": "frontend/dist"
+  "outputDirectory": "frontend/dist",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://kennethcwx-trading.railway.app/api/:path*"
+    }
+  ]
 }
