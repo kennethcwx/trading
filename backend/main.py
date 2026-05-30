@@ -89,6 +89,7 @@ async def handle_telegram_command(text: str):
         telegram_bot.send(
             "<b>Available commands</b>\n\n"
             "/signal AAPL — current signal for any ticker\n"
+            "/share AAPL — shareable summary to send to friends\n"
             "/positions — your open trades with live P&L\n"
             "/watchlist — show your watchlist\n"
             "/add AAPL — add ticker to watchlist\n"
@@ -167,6 +168,33 @@ async def handle_telegram_command(text: str):
             )
         msg = telegram_bot.format_signal(symbol, signal, analysis, pos_size, fundamentals)
         telegram_bot.send(msg)
+
+    elif cmd == "/share":
+        if len(parts) < 2:
+            telegram_bot.send("Usage: /share AAPL")
+            return
+        symbol = parts[1].upper()
+        telegram_bot.send(f"⏳ Generating summary for {symbol}…")
+        regime = await loop.run_in_executor(None, get_market_regime)
+        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+        if not analysis:
+            telegram_bot.send(f"❌ Could not fetch data for {symbol} — check the ticker")
+            return
+        fundamentals = await loop.run_in_executor(None, get_fundamentals, symbol)
+        rel_strength = await loop.run_in_executor(None, get_relative_strength, symbol)
+        signal = generate_signal(analysis, None, regime, fundamentals, rel_strength)
+        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+        size_mult = regime.get("new_position_size_multiplier", 1.0)
+        pos_size = None
+        if signal["action"] == "BUY":
+            pos_size = calculate_position_size(
+                PORTFOLIO_SIZE_SGD, analysis["price"], analysis["stop_loss"], sgd_to_usd, size_mult,
+            )
+        card = telegram_bot.format_share_card(symbol, signal, analysis, pos_size, fundamentals)
+        if card:
+            telegram_bot.send(card)
+        else:
+            telegram_bot.send(f"{symbol} has no actionable signal right now — signal is {signal['action']}")
 
     elif cmd == "/positions":
         conn = db.get_conn()
