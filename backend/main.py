@@ -50,7 +50,7 @@ async def signal_watcher():
                             PORTFOLIO_SIZE_SGD, analysis["price"],
                             analysis["stop_loss"], sgd_to_usd, size_mult,
                         )
-                    msg = telegram_bot.format_signal(symbol, signal, analysis, pos_size)
+                    msg = telegram_bot.format_signal(symbol, signal, analysis, pos_size, fundamentals)
                     telegram_bot.send(msg)
 
                 _last_signals[symbol] = action
@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI):
     db.init_db()
     ibkr.connect_background(paper=True)
     watcher = asyncio.create_task(signal_watcher())
-    telegram_bot.send("📊 Trading dashboard started")
+    telegram_bot.send(telegram_bot.format_startup(db.get_watchlist()))
     yield
     watcher.cancel()
 
