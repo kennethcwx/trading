@@ -2,7 +2,8 @@ import asyncio
 import logging
 import uvicorn
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -227,6 +228,79 @@ async def handle_telegram_command(text: str):
         telegram_bot.send("Unknown command. Type /help to see what's available.")
 
 
+async def send_morning_briefing():
+    loop = asyncio.get_event_loop()
+    ET = ZoneInfo("America/New_York")
+    SGT = ZoneInfo("Asia/Singapore")
+
+    now_et = datetime.now(ET)
+    market_open_sgt = now_et.replace(hour=9, minute=30, second=0).astimezone(SGT)
+    open_time_sgt = market_open_sgt.strftime("%I:%M %p").lstrip("0")
+
+    regime = await loop.run_in_executor(None, get_market_regime)
+    sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+
+    conn = db.get_conn()
+    rows = conn.execute("SELECT * FROM trades WHERE exit_price IS NULL ORDER BY entry_date DESC").fetchall()
+    conn.close()
+
+    open_trades = []
+    for row in rows:
+        t = dict(row)
+        analysis = await loop.run_in_executor(None, get_ticker_analysis, t["symbol"])
+        current = analysis["price"] if analysis else None
+        pnl_pct = ((current - t["entry_price"]) / t["entry_price"]) * 100 if current else None
+        open_trades.append({
+            "symbol": t["symbol"],
+            "shares": t["shares"],
+            "entry_price": t["entry_price"],
+            "pnl_pct": pnl_pct,
+        })
+
+    actionable_signals, watch_signals = [], []
+    for symbol in db.get_watchlist():
+        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+        if not analysis:
+            continue
+        fundamentals = await loop.run_in_executor(None, get_fundamentals, symbol)
+        rel_strength = await loop.run_in_executor(None, get_relative_strength, symbol)
+        signal = generate_signal(analysis, None, regime, fundamentals, rel_strength)
+        action = signal["action"]
+        reason = signal["reasons"][0] if signal["reasons"] else signal["suggested_action"]
+        if action in ACTIONABLE:
+            actionable_signals.append({"symbol": symbol, "action": action, "reason": reason})
+        elif action == "WATCH":
+            watch_signals.append({"symbol": symbol, "reason": reason})
+
+    msg = telegram_bot.format_morning_briefing(
+        date_str=now_et.strftime("%a %d %b"),
+        open_time_et="9:30 AM",
+        open_time_sgt=open_time_sgt,
+        regime=regime,
+        open_trades=open_trades,
+        actionable_signals=actionable_signals,
+        watch_signals=watch_signals,
+    )
+    telegram_bot.send(msg)
+
+
+async def morning_briefing_task():
+    ET = ZoneInfo("America/New_York")
+    while True:
+        try:
+            now_et = datetime.now(ET)
+            target = now_et.replace(hour=8, minute=30, second=0, microsecond=0)
+            if now_et >= target:
+                target += timedelta(days=1)
+            await asyncio.sleep((target - now_et).total_seconds())
+            now_et = datetime.now(ET)
+            if now_et.weekday() < 5:  # Mon–Fri only
+                await send_morning_briefing()
+        except Exception as e:
+            logging.warning(f"Morning briefing error: {e}")
+            await asyncio.sleep(60)
+
+
 async def telegram_command_listener():
     offset = 0
     while True:
@@ -248,10 +322,12 @@ async def lifespan(app: FastAPI):
     ibkr.connect_background(paper=True)
     watcher = asyncio.create_task(signal_watcher())
     listener = asyncio.create_task(telegram_command_listener())
+    briefing = asyncio.create_task(morning_briefing_task())
     telegram_bot.send(telegram_bot.format_startup(db.get_watchlist()))
     yield
     watcher.cancel()
     listener.cancel()
+    briefing.cancel()
 
 
 app = FastAPI(lifespan=lifespan)

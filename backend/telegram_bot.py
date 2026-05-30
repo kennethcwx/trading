@@ -281,6 +281,66 @@ def format_share_card(
     return ""
 
 
+def format_morning_briefing(
+    date_str: str,
+    open_time_et: str,
+    open_time_sgt: str,
+    regime: dict,
+    open_trades: list[dict],
+    actionable_signals: list[dict],
+    watch_signals: list[dict],
+) -> str:
+    bullish = regime.get("regime_ok", False)
+    vix = regime.get("vix", 0)
+    sgd = regime.get("sgd_to_usd", 0.74)
+    vix_label = "calm" if vix < 20 else "elevated" if vix < 30 else "fearful"
+    mult = regime.get("new_position_size_multiplier", 1.0)
+    size_warn = "  ⚠️ half size" if mult < 1 else ""
+
+    lines = [
+        f"🌅 <b>Morning Briefing — {date_str}</b>",
+        "",
+        f"📅 US market opens today",
+        f"   <code>9:30 AM ET  ·  {open_time_sgt} SGT</code>",
+        "",
+        "📊 <b>Market</b>",
+        "<code>"
+        f"Regime   {'BULLISH ▲' if bullish else 'BEARISH ▼'}{size_warn}\n"
+        f"VIX      {vix:.1f}  ({vix_label})\n"
+        f"SGD/USD  {sgd:.4f}"
+        "</code>",
+    ]
+
+    if open_trades:
+        lines += ["", f"📋 <b>Open Positions ({len(open_trades)})</b>"]
+        for t in open_trades:
+            if t.get("pnl_pct") is not None:
+                sign = "+" if t["pnl_pct"] >= 0 else ""
+                lines.append(
+                    f"<code>{t['symbol']:<6}  {t['shares']:.2f}sh"
+                    f"  in ${t['entry_price']:.2f}  {sign}{t['pnl_pct']:.1f}%</code>"
+                )
+            else:
+                lines.append(f"<code>{t['symbol']:<6}  {t['shares']:.2f}sh  in ${t['entry_price']:.2f}</code>")
+    else:
+        lines += ["", "📋 <b>Open Positions</b>  none"]
+
+    lines += ["", "⚡ <b>Act at market open (9:30 AM ET)</b>"]
+    if actionable_signals:
+        for s in actionable_signals:
+            lines.append(f"• <b>{s['action'].replace('_', ' ')} {s['symbol']}</b> — {s['reason']}")
+    else:
+        lines.append("• Nothing to do — hold positions as planned")
+
+    if watch_signals:
+        lines += ["", "👀 <b>Watch closely</b>"]
+        for s in watch_signals:
+            lines.append(f"• {s['symbol']} — {s['reason']}")
+
+    lines += ["", "<i>Doesn't account for US public holidays. Verify before trading.</i>"]
+    return "\n".join(lines)
+
+
 def format_startup(watchlist: list[str]) -> str:
     tickers = "  ".join(watchlist) if watchlist else "none"
     return (
