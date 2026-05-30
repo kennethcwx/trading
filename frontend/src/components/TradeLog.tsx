@@ -25,7 +25,10 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!form.symbol || !form.shares || !form.entry_price) return
+    if (!form.symbol || !form.shares || !form.entry_price) {
+      setError('Symbol, Shares, and Entry Price are required')
+      return
+    }
     setSaving(true)
     setError(null)
     try {
@@ -50,15 +53,17 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
       <div className="text-xs font-bold text-slate-300 uppercase tracking-widest mb-3">Log New Trade</div>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
         {[
-          { label: 'Symbol', key: 'symbol', placeholder: 'AAPL' },
-          { label: 'Shares', key: 'shares', placeholder: '1.5' },
-          { label: 'Entry Date', key: 'entry_date', placeholder: '' },
-          { label: 'Entry Price (USD)', key: 'entry_price', placeholder: '182.50' },
-          { label: 'Signal (optional)', key: 'signal_reason', placeholder: 'RSI <40 + 200 SMA' },
-          { label: 'Notes (optional)', key: 'notes', placeholder: '' },
-        ].map(({ label, key, placeholder }) => (
+          { label: 'Symbol', key: 'symbol', placeholder: 'AAPL', required: true },
+          { label: 'Shares', key: 'shares', placeholder: '1.5', required: true },
+          { label: 'Entry Date', key: 'entry_date', placeholder: '', required: false },
+          { label: 'Entry Price (USD)', key: 'entry_price', placeholder: '182.50', required: true },
+          { label: 'Signal (optional)', key: 'signal_reason', placeholder: 'RSI <40 + 200 SMA', required: false },
+          { label: 'Notes (optional)', key: 'notes', placeholder: '', required: false },
+        ].map(({ label, key, placeholder, required }) => (
           <div key={key}>
-            <label className="block text-xs text-slate-500 mb-1">{label}</label>
+            <label className="block text-xs text-slate-500 mb-1">
+              {label}{required && <span className="text-red-400 ml-0.5">*</span>}
+            </label>
             <input
               type={key.includes('date') ? 'date' : 'text'}
               value={form[key as keyof typeof form]}
