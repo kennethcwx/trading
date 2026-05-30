@@ -27,39 +27,40 @@ export function MarketBanner({ regime }: { regime: MarketRegime }) {
     'bg-green-900/60 text-green-300'
 
   return (
-    <div className={`px-6 py-2.5 border-b flex flex-wrap gap-6 items-center text-xs ${
+    <div className={`px-4 sm:px-6 py-2.5 border-b text-xs ${
       bullish ? 'bg-green-950/20 border-green-900/40' : 'bg-red-950/20 border-red-900/40'
     }`}>
-
-      {/* Market health */}
-      <div className="flex items-center gap-2">
-        <span className={`font-bold text-sm ${bullish ? 'text-green-400' : 'text-red-400'}`}>
-          {bullish ? '▲ Market is healthy' : '▼ Market is weak'}
-        </span>
-        <span className="text-slate-600 text-xs">
-          {bullish ? 'New buys are OK' : 'Avoid new positions'}
-        </span>
-      </div>
-
-      {/* Fear level */}
-      <div className="flex items-center gap-2">
-        <span className="text-slate-500">Market fear level:</span>
-        <span className={`font-bold ${vixColor}`}>{vixLabel}</span>
-        <span className={`px-1.5 py-0.5 rounded text-xs font-mono ${vixBadge}`}>
-          VIX {regime.vix.toFixed(1)}
-        </span>
-      </div>
-
-      {/* Size warning */}
-      {regime.new_position_size_multiplier < 1 && (
-        <div className="flex items-center gap-1.5 text-yellow-400 font-medium">
-          <WarningIcon />
-          <span>Use half your normal position size — conditions are risky</span>
+      <div className="flex flex-wrap gap-x-6 gap-y-1.5 items-center">
+        {/* Market health */}
+        <div className="flex items-center gap-2">
+          <span className={`font-bold text-sm ${bullish ? 'text-green-400' : 'text-red-400'}`}>
+            {bullish ? '▲ Healthy' : '▼ Weak'}
+          </span>
+          <span className="text-slate-600">
+            {bullish ? 'New buys OK' : 'Avoid new positions'}
+          </span>
         </div>
-      )}
 
-      <div className="text-slate-700 ml-auto">
-        SGD/USD {regime.sgd_to_usd.toFixed(4)}
+        {/* Fear level */}
+        <div className="flex items-center gap-2">
+          <span className="text-slate-500">Fear:</span>
+          <span className={`font-bold ${vixColor}`}>{vixLabel}</span>
+          <span className={`px-1.5 py-0.5 rounded font-mono ${vixBadge}`}>
+            VIX {regime.vix.toFixed(1)}
+          </span>
+        </div>
+
+        {/* Size warning */}
+        {regime.new_position_size_multiplier < 1 && (
+          <div className="flex items-center gap-1.5 text-yellow-400 font-medium">
+            <WarningIcon />
+            <span>Use half position size</span>
+          </div>
+        )}
+
+        <div className="text-slate-700 ml-auto hidden sm:block">
+          SGD/USD {regime.sgd_to_usd.toFixed(4)}
+        </div>
       </div>
     </div>
   )

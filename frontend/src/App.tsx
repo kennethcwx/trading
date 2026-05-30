@@ -90,7 +90,7 @@ export default function App() {
           <button
             onClick={() => void refresh(true)}
             disabled={loading}
-            className="text-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-40 px-3 py-2 sm:py-1.5 rounded border border-slate-700 text-slate-300 transition-colors cursor-pointer"
+            className="text-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-40 px-4 py-2.5 sm:px-3 sm:py-1.5 rounded border border-slate-700 text-slate-300 transition-colors cursor-pointer min-w-[44px]"
           >
             {loading ? '…' : 'Refresh'}
           </button>

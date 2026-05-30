@@ -64,13 +64,13 @@ export function WatchlistEditor({ onSave }: { onSave?: () => void }) {
               {watchlist.map(sym => (
                 <span
                   key={sym}
-                  className="inline-flex items-center gap-1.5 bg-slate-800 text-slate-200 text-xs px-2.5 py-1 rounded border border-slate-700"
+                  className="inline-flex items-center gap-1 bg-slate-800 text-slate-200 text-xs pl-2.5 pr-1 py-1 rounded border border-slate-700"
                 >
                   <span className="font-bold font-mono">{sym}</span>
                   <button
                     onClick={() => remove(sym)}
                     disabled={saving}
-                    className="text-slate-500 hover:text-red-400 disabled:opacity-40 transition-colors cursor-pointer leading-none"
+                    className="flex items-center justify-center w-6 h-6 text-slate-500 hover:text-red-400 disabled:opacity-40 transition-colors cursor-pointer rounded"
                     aria-label={`Remove ${sym}`}
                   >
                     ×
