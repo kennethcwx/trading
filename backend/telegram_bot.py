@@ -188,6 +188,40 @@ def format_trade_exit(
     )
 
 
+def _options_section(action: str, price: float, stop: float, target: float) -> str:
+    if action == "BUY":
+        call_strike = round(price * 1.05 / 0.5) * 0.5   # ~5% OTM call
+        put_strike  = round(stop / 0.5) * 0.5            # put at stop level
+        return (
+            "\n🎯 <b>Options plays</b> (30–45 DTE, verify IVR &gt; 30 first)\n"
+            "<code>"
+            f"Long call   ${call_strike:.2f} strike  (~5% OTM)\n"
+            f"            Bullish leverage, defined risk\n\n"
+            f"Sell put    ${put_strike:.2f} strike  (at stop level)\n"
+            f"            Get paid to wait for a cheaper entry"
+            "</code>"
+        )
+    elif action == "SELL_HALF":
+        call_strike = round(target / 0.5) * 0.5          # call at target — exit via premium
+        return (
+            "\n🎯 <b>Options plays</b> (30–45 DTE, verify IVR &gt; 30 first)\n"
+            "<code>"
+            f"Sell call   ${call_strike:.2f} strike  (at target)\n"
+            f"            Harvest premium while stock fades"
+            "</code>"
+        )
+    elif action == "SELL":
+        put_strike = round(price * 0.95 / 0.5) * 0.5    # ~5% OTM put
+        return (
+            "\n🎯 <b>Options plays</b> (30–45 DTE, verify IVR &gt; 30 first)\n"
+            "<code>"
+            f"Buy put     ${put_strike:.2f} strike  (~5% OTM)\n"
+            f"            Hedge or short with defined risk"
+            "</code>"
+        )
+    return ""
+
+
 def format_share_card(
     symbol: str,
     signal: dict,
@@ -216,24 +250,31 @@ def format_share_card(
 
         return (
             f"📈 <b>Looking at {symbol}</b>\n\n"
-            f"Trading at <b>${price:.2f}</b> — pulled back to an attractive entry zone while still in a long-term uptrend.\n"
+            f"Trading at <b>${price:.2f}</b> — pulled back to an attractive entry zone while still in a long-term uptrend."
             f"{fund_line}\n\n"
             "<code>"
             f"Entry       ${price:.2f}\n"
             f"Stop loss   ${stop:.2f}  ({_pct(stop, price)})\n"
             f"Target      ${target:.2f}  ({_pct(target, price)})\n"
             f"Risk/Reward 1:{rr}"
-            f"</code>"
-            f"{size_line}\n\n"
+            "</code>"
+            f"{size_line}"
+            f"{_options_section(action, price, stop, target)}\n\n"
             "<i>Not financial advice.</i>"
         )
 
     elif action in ("SELL", "SELL_HALF"):
-        verb = "trimming" if action == "SELL_HALF" else "exiting"
+        verb = "Trimming" if action == "SELL_HALF" else "Exiting"
+        detail = (
+            "Taking partial profits — selling half and moving stop to breakeven."
+            if action == "SELL_HALF"
+            else "Closing the full position to protect capital."
+        )
         return (
-            f"📉 <b>{symbol} — {verb.capitalize()} position</b>\n\n"
+            f"📉 <b>{symbol} — {verb} position</b>\n\n"
             f"Current price: <b>${price:.2f}</b>\n\n"
-            f"{'Taking partial profits — selling half and moving stop to breakeven.' if action == 'SELL_HALF' else 'Closing the full position to protect capital.'}\n\n"
+            f"{detail}"
+            f"{_options_section(action, price, stop, target)}\n\n"
             "<i>Not financial advice.</i>"
         )
 
