@@ -229,9 +229,7 @@ async def handle_telegram_command(text: str):
         telegram_bot.send(msg)
 
     elif cmd == "/pnl":
-        conn = db.get_conn()
-        rows = conn.execute("SELECT * FROM trades ORDER BY entry_date DESC").fetchall()
-        conn.close()
+        rows = db.fetch("SELECT * FROM trades ORDER BY entry_date DESC")
 
         if not rows:
             telegram_bot.send("No trades logged yet.")
@@ -347,11 +345,7 @@ async def handle_telegram_command(text: str):
             telegram_bot.send(f"{symbol} has no actionable signal right now — signal is {signal['action']}")
 
     elif cmd == "/positions":
-        conn = db.get_conn()
-        rows = conn.execute(
-            "SELECT * FROM trades WHERE exit_price IS NULL ORDER BY entry_date DESC"
-        ).fetchall()
-        conn.close()
+        rows = db.fetch("SELECT * FROM trades WHERE exit_price IS NULL ORDER BY entry_date DESC")
 
         if not rows:
             telegram_bot.send("📋 <b>Open Positions</b>\n\nNo open positions.")
@@ -388,9 +382,7 @@ async def send_morning_briefing():
     regime = await loop.run_in_executor(None, get_market_regime)
     sgd_to_usd = regime.get("sgd_to_usd", 0.74)
 
-    conn = db.get_conn()
-    rows = conn.execute("SELECT * FROM trades WHERE exit_price IS NULL ORDER BY entry_date DESC").fetchall()
-    conn.close()
+    rows = db.fetch("SELECT * FROM trades WHERE exit_price IS NULL ORDER BY entry_date DESC")
 
     open_trades = []
     for row in rows:
@@ -660,9 +652,7 @@ async def options_opportunities():
 @app.get("/api/trades")
 async def get_trades():
     loop = asyncio.get_event_loop()
-    conn = db.get_conn()
-    rows = conn.execute("SELECT * FROM trades ORDER BY entry_date DESC").fetchall()
-    conn.close()
+    rows = db.fetch("SELECT * FROM trades ORDER BY entry_date DESC")
 
     trades = []
     for row in rows:
@@ -688,13 +678,10 @@ async def get_trades():
 @app.post("/api/trades")
 async def add_trade(trade: TradeIn):
     symbol = trade.symbol.upper()
-    conn = db.get_conn()
-    conn.execute(
+    db.mutate(
         "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes) VALUES (?, ?, ?, ?, ?, ?)",
         (symbol, trade.shares, trade.entry_date, trade.entry_price, trade.signal_reason, trade.notes),
     )
-    conn.commit()
-    conn.close()
     loop = asyncio.get_event_loop()
     analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
     telegram_bot.send(telegram_bot.format_trade_entry(
@@ -705,20 +692,16 @@ async def add_trade(trade: TradeIn):
 
 @app.put("/api/trades/{trade_id}/close")
 async def close_trade(trade_id: int, close: TradeClose):
-    conn = db.get_conn()
-    row = conn.execute(
+    row = db.fetchone(
         "SELECT symbol, shares, entry_price FROM trades WHERE id=? AND exit_price IS NULL", (trade_id,)
-    ).fetchone()
+    )
     if not row:
-        conn.close()
         raise HTTPException(status_code=404, detail="Trade not found or already closed")
     symbol, shares, entry_price = row["symbol"], row["shares"], row["entry_price"]
-    conn.execute(
+    db.mutate(
         "UPDATE trades SET exit_date=?, exit_price=?, notes=? WHERE id=?",
         (close.exit_date, close.exit_price, close.notes, trade_id),
     )
-    conn.commit()
-    conn.close()
     loop = asyncio.get_event_loop()
     regime = await loop.run_in_executor(None, get_market_regime)
     sgd_to_usd = regime.get("sgd_to_usd", 0.74)
@@ -730,10 +713,7 @@ async def close_trade(trade_id: int, close: TradeClose):
 
 @app.delete("/api/trades/{trade_id}")
 async def delete_trade(trade_id: int):
-    conn = db.get_conn()
-    conn.execute("DELETE FROM trades WHERE id=?", (trade_id,))
-    conn.commit()
-    conn.close()
+    db.mutate("DELETE FROM trades WHERE id=?", (trade_id,))
     return {"status": "ok"}
 
 
