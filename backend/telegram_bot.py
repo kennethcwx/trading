@@ -150,5 +150,28 @@ def format_startup(watchlist: list[str]) -> str:
     return (
         "📊 <b>Trading Dashboard online</b>\n\n"
         f"<code>Watching   {tickers}</code>\n\n"
-        "Signals will be sent as they trigger."
+        "Signals will be sent as they trigger.\n"
+        "Type /help for available commands."
     )
+
+
+def get_updates(offset: int = 0, timeout: int = 20) -> list[dict]:
+    if not TOKEN:
+        return []
+    try:
+        data = json.dumps({
+            "offset": offset,
+            "timeout": timeout,
+            "allowed_updates": ["message"],
+        }).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TOKEN}/getUpdates",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=timeout + 5)
+        return json.loads(resp.read()).get("result", [])
+    except Exception as e:
+        logger.warning(f"Telegram getUpdates failed: {e}")
+        return []

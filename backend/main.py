@@ -80,14 +80,122 @@ class TradeClose(BaseModel):
     notes: str | None = None
 
 
+async def handle_telegram_command(text: str):
+    parts = text.strip().split()
+    cmd = parts[0].lower().split("@")[0]
+    loop = asyncio.get_event_loop()
+
+    if cmd == "/help":
+        telegram_bot.send(
+            "<b>Available commands</b>\n\n"
+            "/signal AAPL — current signal for any ticker\n"
+            "/watchlist — show your watchlist\n"
+            "/add AAPL — add ticker to watchlist\n"
+            "/remove AAPL — remove ticker from watchlist\n"
+            "/status — market regime overview"
+        )
+
+    elif cmd == "/status":
+        regime = await loop.run_in_executor(None, get_market_regime)
+        bullish = regime.get("regime_ok", False)
+        vix = regime.get("vix", 0)
+        sgd = regime.get("sgd_to_usd", 0.74)
+        mult = regime.get("new_position_size_multiplier", 1.0)
+        size_note = "  ⚠️ Use half size" if mult < 1 else ""
+        telegram_bot.send(
+            f"{'📈' if bullish else '📉'} <b>Market Status</b>\n\n"
+            f"<code>"
+            f"Regime   {'BULLISH' if bullish else 'BEARISH'}{size_note}\n"
+            f"VIX      {vix:.1f}\n"
+            f"SGD/USD  {sgd:.4f}"
+            f"</code>"
+        )
+
+    elif cmd == "/watchlist":
+        symbols = db.get_watchlist()
+        tickers = "  ".join(symbols) if symbols else "empty"
+        telegram_bot.send(f"<b>Watchlist</b>\n\n<code>{tickers}</code>")
+
+    elif cmd == "/add":
+        if len(parts) < 2:
+            telegram_bot.send("Usage: /add AAPL")
+            return
+        symbol = parts[1].upper()
+        watchlist = db.get_watchlist()
+        if symbol in watchlist:
+            telegram_bot.send(f"{symbol} is already in your watchlist")
+        else:
+            db.set_watchlist(watchlist + [symbol])
+            invalidate_cache()
+            telegram_bot.send(f"✅ Added {symbol} — watchlist now: {', '.join(watchlist + [symbol])}")
+
+    elif cmd == "/remove":
+        if len(parts) < 2:
+            telegram_bot.send("Usage: /remove AAPL")
+            return
+        symbol = parts[1].upper()
+        watchlist = db.get_watchlist()
+        if symbol not in watchlist:
+            telegram_bot.send(f"{symbol} is not in your watchlist")
+        else:
+            updated = [s for s in watchlist if s != symbol]
+            db.set_watchlist(updated)
+            invalidate_cache()
+            telegram_bot.send(f"✅ Removed {symbol} — watchlist now: {', '.join(updated) or 'empty'}")
+
+    elif cmd == "/signal":
+        if len(parts) < 2:
+            telegram_bot.send("Usage: /signal AAPL")
+            return
+        symbol = parts[1].upper()
+        telegram_bot.send(f"⏳ Fetching signal for {symbol}…")
+        regime = await loop.run_in_executor(None, get_market_regime)
+        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+        if not analysis:
+            telegram_bot.send(f"❌ Could not fetch data for {symbol} — check the ticker")
+            return
+        fundamentals = await loop.run_in_executor(None, get_fundamentals, symbol)
+        rel_strength = await loop.run_in_executor(None, get_relative_strength, symbol)
+        signal = generate_signal(analysis, None, regime, fundamentals, rel_strength)
+        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+        size_mult = regime.get("new_position_size_multiplier", 1.0)
+        pos_size = None
+        if signal["action"] == "BUY":
+            pos_size = calculate_position_size(
+                PORTFOLIO_SIZE_SGD, analysis["price"], analysis["stop_loss"], sgd_to_usd, size_mult,
+            )
+        msg = telegram_bot.format_signal(symbol, signal, analysis, pos_size, fundamentals)
+        telegram_bot.send(msg)
+
+    else:
+        telegram_bot.send("Unknown command. Type /help to see what's available.")
+
+
+async def telegram_command_listener():
+    offset = 0
+    while True:
+        try:
+            loop = asyncio.get_event_loop()
+            updates = await loop.run_in_executor(None, lambda: telegram_bot.get_updates(offset))
+            for update in updates:
+                offset = update["update_id"] + 1
+                text = update.get("message", {}).get("text", "").strip()
+                if text.startswith("/"):
+                    await handle_telegram_command(text)
+        except Exception as e:
+            logging.warning(f"Telegram command listener error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
     ibkr.connect_background(paper=True)
     watcher = asyncio.create_task(signal_watcher())
+    listener = asyncio.create_task(telegram_command_listener())
     telegram_bot.send(telegram_bot.format_startup(db.get_watchlist()))
     yield
     watcher.cancel()
+    listener.cancel()
 
 
 app = FastAPI(lifespan=lifespan)

@@ -1,13 +1,13 @@
 import { useState, useEffect } from 'react'
 
 const ITEMS = [
-  { id: 'regime',    text: 'Check the market banner — healthy or bearish?' },
-  { id: 'signals',   text: 'Read This Week\'s Action Plan — any buys or sells?' },
-  { id: 'stops',     text: 'Are your open positions still above their stop prices?' },
-  { id: 'earnings',  text: 'Any stocks with earnings coming up? Consider reducing size' },
-  { id: 'winners',   text: 'Any position up 15%+? Move your stop up to lock in gains' },
-  { id: 'candidates', text: 'Pick at most 3 stocks to act on — avoid overtrading' },
-  { id: 'journal',   text: 'Log this week\'s trades in the Trade Log below' },
+  { id: 'regime',   text: 'Market banner: is the regime bullish? No new buys if bearish.' },
+  { id: 'signals',  text: 'Action Plan: any BUY or SELL signals to execute at Monday open?' },
+  { id: 'stops',    text: 'Check open positions — still above their stop prices?' },
+  { id: 'earnings', text: 'Any earnings in the next 7 days? Decide to hold or exit beforehand.' },
+  { id: 'trailing', text: 'Any position up 15%+? Move stop up to lock in gains.' },
+  { id: 'ivr',      text: 'Check Market Chameleon: IVR > 30 on any watchlist stock? Covered call opportunity.' },
+  { id: 'journal',  text: 'Log any trades executed this week in the Trade Log.' },
 ]
 
 function getWeekKey() {
@@ -93,7 +93,7 @@ export function WeeklyChecklist() {
       )}
 
       <div className="px-4 py-2 border-t border-slate-800 text-xs text-slate-700">
-        Resets each week · {key}
+        Resets every Monday · execute signals at 9:30 AM ET
       </div>
     </div>
   )
