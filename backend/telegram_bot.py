@@ -145,6 +145,49 @@ def format_signal(
     return "\n".join(lines)
 
 
+def format_trade_entry(
+    symbol: str,
+    shares: float,
+    entry_price: float,
+    entry_date: str,
+    analysis: dict | None = None,
+) -> str:
+    stop = analysis.get("stop_loss", 0) if analysis else 0
+    target = analysis.get("profit_target", 0) if analysis else 0
+
+    data = f"Price    ${entry_price:.2f}\nShares   {shares:.3f}\nDate     {entry_date}"
+    if stop and target:
+        data += (
+            f"\n\nStop     ${stop:.2f}  ({_pct(stop, entry_price)})\n"
+            f"Target   ${target:.2f}  ({_pct(target, entry_price)})"
+        )
+
+    return f"📥 <b>TRADE LOGGED — {symbol}</b>\n\n<code>{data}</code>"
+
+
+def format_trade_exit(
+    symbol: str,
+    shares: float,
+    entry_price: float,
+    exit_price: float,
+    sgd_to_usd: float = 0.74,
+) -> str:
+    pnl_usd = (exit_price - entry_price) * shares
+    pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+    pnl_sgd = pnl_usd / sgd_to_usd
+    sign = "+" if pnl_usd >= 0 else ""
+    label = "✅ WIN" if pnl_usd >= 0 else "❌ LOSS"
+
+    return (
+        f"📤 <b>CLOSED — {symbol}  {label}</b>\n\n"
+        "<code>"
+        f"Entry    ${entry_price:.2f}  →  Exit ${exit_price:.2f}\n"
+        f"Shares   {shares:.3f}\n"
+        f"P&L      {sign}${pnl_usd:.2f}  ({sign}{pnl_pct:.1f}%)  ·  S${pnl_sgd:+.0f}"
+        "</code>"
+    )
+
+
 def format_startup(watchlist: list[str]) -> str:
     tickers = "  ".join(watchlist) if watchlist else "none"
     return (

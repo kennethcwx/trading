@@ -89,6 +89,7 @@ async def handle_telegram_command(text: str):
         telegram_bot.send(
             "<b>Available commands</b>\n\n"
             "/signal AAPL — current signal for any ticker\n"
+            "/positions — your open trades with live P&L\n"
             "/watchlist — show your watchlist\n"
             "/add AAPL — add ticker to watchlist\n"
             "/remove AAPL — remove ticker from watchlist\n"
@@ -166,6 +167,33 @@ async def handle_telegram_command(text: str):
             )
         msg = telegram_bot.format_signal(symbol, signal, analysis, pos_size, fundamentals)
         telegram_bot.send(msg)
+
+    elif cmd == "/positions":
+        conn = db.get_conn()
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE exit_price IS NULL ORDER BY entry_date DESC"
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            telegram_bot.send("📋 <b>Open Positions</b>\n\nNo open positions.")
+            return
+
+        lines = [f"📋 <b>Open Positions ({len(rows)})</b>", ""]
+        for row in rows:
+            t = dict(row)
+            analysis = await loop.run_in_executor(None, get_ticker_analysis, t["symbol"])
+            current = analysis["price"] if analysis else None
+            if current:
+                pnl_pct = ((current - t["entry_price"]) / t["entry_price"]) * 100
+                sign = "+" if pnl_pct >= 0 else ""
+                lines.append(
+                    f"<code>{t['symbol']:<6}  {t['shares']:.2f}sh"
+                    f"  in ${t['entry_price']:.2f}  now ${current:.2f}  {sign}{pnl_pct:.1f}%</code>"
+                )
+            else:
+                lines.append(f"<code>{t['symbol']:<6}  {t['shares']:.2f}sh  in ${t['entry_price']:.2f}</code>")
+        telegram_bot.send("\n".join(lines))
 
     else:
         telegram_bot.send("Unknown command. Type /help to see what's available.")
@@ -407,29 +435,44 @@ async def get_trades():
 
 @app.post("/api/trades")
 async def add_trade(trade: TradeIn):
+    symbol = trade.symbol.upper()
     conn = db.get_conn()
     conn.execute(
         "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes) VALUES (?, ?, ?, ?, ?, ?)",
-        (trade.symbol.upper(), trade.shares, trade.entry_date, trade.entry_price, trade.signal_reason, trade.notes),
+        (symbol, trade.shares, trade.entry_date, trade.entry_price, trade.signal_reason, trade.notes),
     )
     conn.commit()
     conn.close()
+    loop = asyncio.get_event_loop()
+    analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+    telegram_bot.send(telegram_bot.format_trade_entry(
+        symbol, trade.shares, trade.entry_price, trade.entry_date, analysis
+    ))
     return {"status": "ok"}
 
 
 @app.put("/api/trades/{trade_id}/close")
 async def close_trade(trade_id: int, close: TradeClose):
     conn = db.get_conn()
-    row = conn.execute("SELECT id FROM trades WHERE id=? AND exit_price IS NULL", (trade_id,)).fetchone()
+    row = conn.execute(
+        "SELECT symbol, shares, entry_price FROM trades WHERE id=? AND exit_price IS NULL", (trade_id,)
+    ).fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Trade not found or already closed")
+    symbol, shares, entry_price = row["symbol"], row["shares"], row["entry_price"]
     conn.execute(
         "UPDATE trades SET exit_date=?, exit_price=?, notes=? WHERE id=?",
         (close.exit_date, close.exit_price, close.notes, trade_id),
     )
     conn.commit()
     conn.close()
+    loop = asyncio.get_event_loop()
+    regime = await loop.run_in_executor(None, get_market_regime)
+    sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+    telegram_bot.send(telegram_bot.format_trade_exit(
+        symbol, shares, entry_price, close.exit_price, sgd_to_usd
+    ))
     return {"status": "ok"}
 
 
