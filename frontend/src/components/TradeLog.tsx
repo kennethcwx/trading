@@ -18,6 +18,7 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
     symbol: '', shares: '', entry_date: today(), entry_price: '', signal_reason: '', notes: '',
   })
   const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm(f => ({ ...f, [k]: e.target.value }))
@@ -26,16 +27,22 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
     e.preventDefault()
     if (!form.symbol || !form.shares || !form.entry_price) return
     setSaving(true)
-    await addTrade({
-      symbol: form.symbol.toUpperCase(),
-      shares: parseFloat(form.shares),
-      entry_date: form.entry_date,
-      entry_price: parseFloat(form.entry_price),
-      signal_reason: form.signal_reason || undefined,
-      notes: form.notes || undefined,
-    })
-    setSaving(false)
-    onSave()
+    setError(null)
+    try {
+      await addTrade({
+        symbol: form.symbol.toUpperCase(),
+        shares: parseFloat(form.shares),
+        entry_date: form.entry_date,
+        entry_price: parseFloat(form.entry_price),
+        signal_reason: form.signal_reason || undefined,
+        notes: form.notes || undefined,
+      })
+      onSave()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save trade — check backend is running')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -62,7 +69,7 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
           </div>
         ))}
       </div>
-      <div className="flex gap-2">
+      <div className="flex gap-2 items-center flex-wrap">
         <button
           type="submit"
           disabled={saving}
@@ -77,6 +84,7 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
         >
           Cancel
         </button>
+        {error && <span className="text-xs text-red-400">{error}</span>}
       </div>
     </form>
   )
@@ -85,6 +93,7 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
 function CloseForm({ trade, onSave, onCancel }: { trade: Trade; onSave: () => void; onCancel: () => void }) {
   const [form, setForm] = useState({ exit_date: today(), exit_price: '', notes: '' })
   const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm(f => ({ ...f, [k]: e.target.value }))
@@ -93,13 +102,19 @@ function CloseForm({ trade, onSave, onCancel }: { trade: Trade; onSave: () => vo
     e.preventDefault()
     if (!form.exit_price) return
     setSaving(true)
-    await closeTrade(trade.id, {
-      exit_date: form.exit_date,
-      exit_price: parseFloat(form.exit_price),
-      notes: form.notes || undefined,
-    })
-    setSaving(false)
-    onSave()
+    setError(null)
+    try {
+      await closeTrade(trade.id, {
+        exit_date: form.exit_date,
+        exit_price: parseFloat(form.exit_price),
+        notes: form.notes || undefined,
+      })
+      onSave()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to close trade — check backend is running')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -122,7 +137,7 @@ function CloseForm({ trade, onSave, onCancel }: { trade: Trade; onSave: () => vo
             className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 w-40 focus:outline-none focus:border-teal-500" />
         </div>
       </div>
-      <div className="flex gap-2 mt-2">
+      <div className="flex gap-2 mt-2 items-center flex-wrap">
         <button type="submit" disabled={saving}
           className="text-xs bg-teal-700 hover:bg-teal-600 disabled:opacity-40 px-3 py-1 rounded text-white transition-colors cursor-pointer">
           {saving ? 'Saving…' : 'Confirm Close'}
@@ -131,6 +146,7 @@ function CloseForm({ trade, onSave, onCancel }: { trade: Trade; onSave: () => vo
           className="text-xs bg-slate-800 hover:bg-slate-700 px-3 py-1 rounded border border-slate-700 text-slate-400 transition-colors cursor-pointer">
           Cancel
         </button>
+        {error && <span className="text-xs text-red-400">{error}</span>}
       </div>
     </form>
   )
@@ -139,15 +155,22 @@ function CloseForm({ trade, onSave, onCancel }: { trade: Trade; onSave: () => vo
 export function TradeLog({ onTradesChange }: { onTradesChange?: (trades: Trade[]) => void }) {
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [closingId, setClosingId] = useState<number | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
-    const res = await fetchTrades()
-    setTrades(res.trades)
-    onTradesChange?.(res.trades)
-    setLoading(false)
+    setLoadError(null)
+    try {
+      const res = await fetchTrades()
+      setTrades(res.trades)
+      onTradesChange?.(res.trades)
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to load trades')
+    } finally {
+      setLoading(false)
+    }
   }, [onTradesChange])
 
   useEffect(() => { void load() }, [load])
@@ -206,7 +229,13 @@ export function TradeLog({ onTradesChange }: { onTradesChange?: (trades: Trade[]
 
         {loading && <div className="text-xs text-slate-500 py-4 text-center">Loading…</div>}
 
-        {!loading && trades.length === 0 && (
+        {loadError && (
+          <div className="text-xs text-red-400 py-4 text-center">
+            {loadError} — <button onClick={() => void load()} className="underline cursor-pointer">retry</button>
+          </div>
+        )}
+
+        {!loading && !loadError && trades.length === 0 && (
           <div className="text-xs text-slate-500 py-6 text-center">
             No trades logged yet. Click <span className="text-teal-400">+ Log Trade</span> when you execute a signal.
           </div>
