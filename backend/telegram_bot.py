@@ -351,6 +351,38 @@ def format_startup(watchlist: list[str]) -> str:
     )
 
 
+def set_bot_commands() -> bool:
+    if not TOKEN:
+        return False
+    commands = [
+        {"command": "signal",      "description": "Signal for any ticker — /signal AAPL"},
+        {"command": "share",       "description": "Shareable summary for friends — /share AAPL"},
+        {"command": "positions",   "description": "Open trades with live P&L"},
+        {"command": "pnl",         "description": "Total realized + unrealized P&L"},
+        {"command": "alert",       "description": "Set price alert — /alert AAPL 200"},
+        {"command": "alerts",      "description": "List active price alerts"},
+        {"command": "removealert", "description": "Remove alert by ID — /removealert 1"},
+        {"command": "status",      "description": "Market regime, VIX, SGD/USD"},
+        {"command": "watchlist",   "description": "Show your watchlist"},
+        {"command": "add",         "description": "Add ticker — /add AAPL"},
+        {"command": "remove",      "description": "Remove ticker — /remove AAPL"},
+        {"command": "help",        "description": "Show all commands"},
+    ]
+    try:
+        data = json.dumps({"commands": commands}).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TOKEN}/setMyCommands",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=8)
+        return True
+    except Exception as e:
+        logger.warning(f"Telegram setMyCommands failed: {e}")
+        return False
+
+
 def get_updates(offset: int = 0, timeout: int = 20) -> list[dict]:
     if not TOKEN:
         return []

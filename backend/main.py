@@ -228,6 +228,44 @@ async def handle_telegram_command(text: str):
         msg = telegram_bot.format_signal(symbol, signal, analysis, pos_size, fundamentals)
         telegram_bot.send(msg)
 
+    elif cmd == "/pnl":
+        conn = db.get_conn()
+        rows = conn.execute("SELECT * FROM trades ORDER BY entry_date DESC").fetchall()
+        conn.close()
+
+        if not rows:
+            telegram_bot.send("No trades logged yet.")
+            return
+
+        realized_usd = 0.0
+        unrealized_usd = 0.0
+        regime = await loop.run_in_executor(None, get_market_regime)
+        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+
+        for row in rows:
+            t = dict(row)
+            if t["exit_price"] is not None:
+                realized_usd += (t["exit_price"] - t["entry_price"]) * t["shares"]
+            else:
+                analysis = await loop.run_in_executor(None, get_ticker_analysis, t["symbol"])
+                if analysis:
+                    unrealized_usd += (analysis["price"] - t["entry_price"]) * t["shares"]
+
+        total_usd = realized_usd + unrealized_usd
+        r_sign = "+" if realized_usd >= 0 else ""
+        u_sign = "+" if unrealized_usd >= 0 else ""
+        t_sign = "+" if total_usd >= 0 else ""
+
+        telegram_bot.send(
+            "💰 <b>P&L Summary</b>\n\n"
+            "<code>"
+            f"Realized    {r_sign}${realized_usd:.2f}  ({r_sign}S${realized_usd/sgd_to_usd:.0f})\n"
+            f"Unrealized  {u_sign}${unrealized_usd:.2f}  ({u_sign}S${unrealized_usd/sgd_to_usd:.0f})\n"
+            f"─────────────────────────\n"
+            f"Total       {t_sign}${total_usd:.2f}  ({t_sign}S${total_usd/sgd_to_usd:.0f})"
+            "</code>"
+        )
+
     elif cmd == "/alert":
         if len(parts) < 3:
             telegram_bot.send("Usage: /alert AAPL 200.50")
@@ -432,6 +470,7 @@ async def lifespan(app: FastAPI):
     watcher = asyncio.create_task(signal_watcher())
     listener = asyncio.create_task(telegram_command_listener())
     briefing = asyncio.create_task(morning_briefing_task())
+    telegram_bot.set_bot_commands()
     telegram_bot.send(telegram_bot.format_startup(db.get_watchlist()))
     yield
     watcher.cancel()
