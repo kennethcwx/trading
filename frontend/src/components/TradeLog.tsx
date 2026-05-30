@@ -29,14 +29,24 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
       setError('Symbol, Shares, and Entry Price are required')
       return
     }
+    const shares = parseFloat(form.shares)
+    const price = parseFloat(form.entry_price)
+    if (isNaN(shares) || shares <= 0) {
+      setError('Shares must be a positive number')
+      return
+    }
+    if (isNaN(price) || price <= 0) {
+      setError('Entry Price must be a positive number')
+      return
+    }
     setSaving(true)
     setError(null)
     try {
       await addTrade({
-        symbol: form.symbol.toUpperCase(),
-        shares: parseFloat(form.shares),
+        symbol: form.symbol.toUpperCase().trim(),
+        shares,
         entry_date: form.entry_date,
-        entry_price: parseFloat(form.entry_price),
+        entry_price: price,
         signal_reason: form.signal_reason || undefined,
         notes: form.notes || undefined,
       })
@@ -105,13 +115,17 @@ function CloseForm({ trade, onSave, onCancel }: { trade: Trade; onSave: () => vo
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!form.exit_price) return
+    const exitPrice = parseFloat(form.exit_price)
+    if (!form.exit_price || isNaN(exitPrice) || exitPrice <= 0) {
+      setError('Exit Price must be a positive number')
+      return
+    }
     setSaving(true)
     setError(null)
     try {
       await closeTrade(trade.id, {
         exit_date: form.exit_date,
-        exit_price: parseFloat(form.exit_price),
+        exit_price: exitPrice,
         notes: form.notes || undefined,
       })
       onSave()
