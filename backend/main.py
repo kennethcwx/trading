@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import logging
 import uvicorn
 from contextlib import asynccontextmanager
@@ -23,17 +24,47 @@ logging.basicConfig(level=logging.INFO)
 
 ACTIONABLE = {"BUY", "SELL", "SELL_HALF", "REVIEW"}
 _last_signals: dict[str, str] = {}
+_price_alerts: dict[int, dict] = {}
+_alert_id_gen = itertools.count(1)
+
+ET = ZoneInfo("America/New_York")
+
+
+def _market_is_open() -> bool:
+    now = datetime.now(ET)
+    if now.weekday() >= 5:
+        return False
+    open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    close_t = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return open_t <= now < close_t
+
+
+def _seconds_until_next_open() -> float:
+    now = datetime.now(ET)
+    target = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    if now >= target or now.weekday() >= 5:
+        target += timedelta(days=1)
+    while target.weekday() >= 5:
+        target += timedelta(days=1)
+    return max((target - now).total_seconds(), 60)
 
 
 async def signal_watcher():
     await asyncio.sleep(30)  # let startup finish first
     while True:
+        if not _market_is_open():
+            secs = _seconds_until_next_open()
+            logging.info(f"Market closed — sleeping {secs/3600:.1f}h until next open")
+            await asyncio.sleep(secs)
+            continue
+
         try:
             loop = asyncio.get_event_loop()
             regime = await loop.run_in_executor(None, get_market_regime)
             sgd_to_usd = regime.get("sgd_to_usd", 0.74)
             size_mult = regime.get("new_position_size_multiplier", 1.0)
 
+            # Signals
             for symbol in db.get_watchlist():
                 analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
                 if not analysis:
@@ -55,6 +86,30 @@ async def signal_watcher():
                     telegram_bot.send(msg)
 
                 _last_signals[symbol] = action
+
+            # Price alerts
+            fired_ids = []
+            for alert_id, alert in list(_price_alerts.items()):
+                analysis = await loop.run_in_executor(None, get_ticker_analysis, alert["symbol"])
+                if not analysis:
+                    continue
+                current = analysis["price"]
+                hit = (
+                    (alert["direction"] == "above" and current >= alert["target"]) or
+                    (alert["direction"] == "below" and current <= alert["target"])
+                )
+                if hit:
+                    arrow = "↑" if alert["direction"] == "above" else "↓"
+                    telegram_bot.send(
+                        f"🔔 <b>Price Alert — {alert['symbol']}</b>\n\n"
+                        f"<code>"
+                        f"Target   ${alert['target']:.2f}  {arrow}\n"
+                        f"Current  ${current:.2f}"
+                        f"</code>"
+                    )
+                    fired_ids.append(alert_id)
+            for aid in fired_ids:
+                _price_alerts.pop(aid, None)
 
         except Exception as e:
             logging.warning(f"Signal watcher error: {e}")
@@ -92,6 +147,9 @@ async def handle_telegram_command(text: str):
             "/signal AAPL — current signal for any ticker\n"
             "/share AAPL — shareable summary to send to friends\n"
             "/positions — your open trades with live P&L\n"
+            "/alert AAPL 200 — notify when price crosses a level\n"
+            "/alerts — list active price alerts\n"
+            "/removealert 1 — remove alert by ID\n"
             "/watchlist — show your watchlist\n"
             "/add AAPL — add ticker to watchlist\n"
             "/remove AAPL — remove ticker from watchlist\n"
@@ -170,6 +228,59 @@ async def handle_telegram_command(text: str):
         msg = telegram_bot.format_signal(symbol, signal, analysis, pos_size, fundamentals)
         telegram_bot.send(msg)
 
+    elif cmd == "/alert":
+        if len(parts) < 3:
+            telegram_bot.send("Usage: /alert AAPL 200.50")
+            return
+        symbol = parts[1].upper()
+        try:
+            target = float(parts[2])
+        except ValueError:
+            telegram_bot.send("Usage: /alert AAPL 200.50")
+            return
+        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+        if not analysis:
+            telegram_bot.send(f"❌ Could not fetch data for {symbol}")
+            return
+        current = analysis["price"]
+        direction = "above" if current < target else "below"
+        alert_id = next(_alert_id_gen)
+        _price_alerts[alert_id] = {"symbol": symbol, "target": target, "direction": direction}
+        arrow = "↑" if direction == "above" else "↓"
+        telegram_bot.send(
+            f"🔔 Alert #{alert_id} set — <b>{symbol}</b>\n\n"
+            f"<code>"
+            f"Target   ${target:.2f}  {arrow}\n"
+            f"Current  ${current:.2f}"
+            f"</code>\n\n"
+            f"You'll be notified when the price {'rises above' if direction == 'above' else 'falls below'} ${target:.2f}."
+        )
+
+    elif cmd == "/alerts":
+        if not _price_alerts:
+            telegram_bot.send("No active price alerts. Use /alert AAPL 200 to set one.")
+            return
+        lines = ["🔔 <b>Active Alerts</b>", ""]
+        for aid, a in _price_alerts.items():
+            arrow = "↑" if a["direction"] == "above" else "↓"
+            lines.append(f"<code>#{aid}  {a['symbol']:<6}  {arrow}  ${a['target']:.2f}</code>")
+        lines.append("\nUse /removealert &lt;id&gt; to cancel one.")
+        telegram_bot.send("\n".join(lines))
+
+    elif cmd == "/removealert":
+        if len(parts) < 2:
+            telegram_bot.send("Usage: /removealert 1  (use /alerts to see IDs)")
+            return
+        try:
+            alert_id = int(parts[1])
+        except ValueError:
+            telegram_bot.send("Usage: /removealert 1")
+            return
+        if _price_alerts.pop(alert_id, None):
+            telegram_bot.send(f"✅ Alert #{alert_id} removed.")
+        else:
+            telegram_bot.send(f"Alert #{alert_id} not found. Use /alerts to see active ones.")
+
     elif cmd == "/share":
         if len(parts) < 2:
             telegram_bot.send("Usage: /share AAPL")
@@ -230,7 +341,6 @@ async def handle_telegram_command(text: str):
 
 async def send_morning_briefing():
     loop = asyncio.get_event_loop()
-    ET = ZoneInfo("America/New_York")
     SGT = ZoneInfo("Asia/Singapore")
 
     now_et = datetime.now(ET)
@@ -285,7 +395,6 @@ async def send_morning_briefing():
 
 
 async def morning_briefing_task():
-    ET = ZoneInfo("America/New_York")
     while True:
         try:
             now_et = datetime.now(ET)
