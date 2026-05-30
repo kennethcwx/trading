@@ -65,19 +65,6 @@ class WatchlistUpdate(BaseModel):
     symbols: list[str]
 
 
-@app.get("/api/watchlist")
-async def get_watchlist():
-    return {"watchlist": db.get_watchlist()}
-
-
-@app.put("/api/watchlist")
-async def update_watchlist(body: WatchlistUpdate):
-    symbols = [s.strip().upper() for s in body.symbols if s.strip()]
-    db.set_watchlist(symbols)
-    invalidate_cache()
-    return {"watchlist": symbols}
-
-
 class TradeIn(BaseModel):
     symbol: str
     shares: float
@@ -111,6 +98,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/api/watchlist")
+async def get_watchlist():
+    return {"watchlist": db.get_watchlist()}
+
+
+@app.put("/api/watchlist")
+async def update_watchlist(body: WatchlistUpdate):
+    symbols = [s.strip().upper() for s in body.symbols if s.strip()]
+    db.set_watchlist(symbols)
+    invalidate_cache()
+    return {"watchlist": symbols}
 
 
 @app.get("/api/status")
