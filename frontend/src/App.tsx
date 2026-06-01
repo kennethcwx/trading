@@ -242,14 +242,7 @@ export default function App() {
               {signals && <ActionSummary signals={signals} />}
               <PnLChart trades={trades} />
 
-              <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
-                <div className="xl:col-span-2">
-                  <WeeklyChecklist />
-                </div>
-                <div>
-                  <WatchlistEditor onSave={() => void refresh()} />
-                </div>
-              </div>
+                <WeeklyChecklist />
 
               {options && <OptionsPanel options={options} />}
             </>
@@ -268,6 +261,7 @@ export default function App() {
                   </div>
                 )
               }
+              <WatchlistEditor onSave={() => void refresh()} />
             </>
           )}
 
