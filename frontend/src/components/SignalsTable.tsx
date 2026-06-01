@@ -1,58 +1,47 @@
+import { useState } from 'react'
 import type { SignalsResponse, SignalItem, SignalAction, Fundamentals, RelativeStrength } from '../types'
 
-function WarningIcon() {
+const BADGE: Record<SignalAction, { color: string; bg: string; border: string }> = {
+  BUY:       { color: 'var(--green)',  bg: 'var(--green-dim)',  border: 'rgba(0,200,5,0.25)' },
+  SELL:      { color: 'var(--red)',    bg: 'var(--red-dim)',    border: 'rgba(255,59,48,0.25)' },
+  SELL_HALF: { color: 'var(--orange)', bg: 'var(--orange-dim)', border: 'rgba(255,149,0,0.25)' },
+  REVIEW:    { color: 'var(--amber)',  bg: 'var(--amber-dim)',  border: 'rgba(255,159,10,0.25)' },
+  HOLD:      { color: '#888',          bg: 'rgba(255,255,255,0.04)', border: 'var(--border-2)' },
+  WATCH:     { color: 'var(--yellow)', bg: 'var(--yellow-dim)', border: 'rgba(255,214,10,0.25)' },
+  SKIP:      { color: '#555',          bg: 'transparent',       border: 'transparent' },
+}
+
+const GRADE_COLOR: Record<string, string> = {
+  A: 'var(--green)', B: 'var(--teal)', C: 'var(--yellow)', D: 'var(--red)', '?': '#555',
+}
+
+type FilterTab = 'all' | 'actionable' | 'watching' | 'hold'
+
+function RsiBar({ rsi }: { rsi: number | null }) {
+  if (rsi === null) return <span style={{ color: '#555' }}>—</span>
+  const pct = Math.min(100, Math.max(0, rsi))
+  const color = rsi > 70 ? 'var(--red)' : rsi < 40 ? 'var(--green)' : 'var(--yellow)'
+  const label = rsi > 70 ? 'Overbought' : rsi < 40 ? 'Oversold' : 'Neutral'
   return (
-    <svg className="w-3 h-3 inline-block flex-shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-    </svg>
+    <div className="flex items-center gap-2" title={`RSI ${rsi.toFixed(0)} — ${label}`}>
+      <div className="w-14 h-1.5 rounded-full overflow-hidden flex-shrink-0" style={{ background: 'var(--border-2)' }}>
+        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: color }} />
+      </div>
+      <span className="font-mono text-xs" style={{ color }}>{rsi.toFixed(0)}</span>
+    </div>
   )
 }
 
-const ACTION_STYLE: Record<SignalAction, string> = {
-  BUY:       'bg-green-900/70 text-green-300 border border-green-700',
-  SELL:      'bg-red-900/70 text-red-300 border border-red-700',
-  SELL_HALF: 'bg-orange-900/70 text-orange-300 border border-orange-700',
-  HOLD:      'bg-slate-800 text-slate-400 border border-slate-700',
-  WATCH:     'bg-yellow-900/70 text-yellow-300 border border-yellow-700',
-  SKIP:      'bg-slate-900 text-slate-600 border border-slate-800',
-  REVIEW:    'bg-amber-900/70 text-amber-300 border border-amber-700',
+function TrendIcon({ above }: { above: boolean | null }) {
+  if (above === null) return <span style={{ color: '#555' }}>—</span>
+  return above
+    ? <span className="text-sm font-bold" style={{ color: 'var(--green)' }} title="Above 200-day average">▲</span>
+    : <span className="text-sm font-bold" style={{ color: 'var(--red)' }} title="Below 200-day average">▼</span>
 }
 
-const PRIORITY_DOT: Record<string, string> = {
-  HIGH: 'bg-red-400',
-  MEDIUM: 'bg-yellow-400',
-  LOW: 'bg-slate-600',
-}
-
-const GRADE_STYLE: Record<string, string> = {
-  A: 'text-green-400 font-bold',
-  B: 'text-teal-400 font-bold',
-  C: 'text-yellow-400',
-  D: 'text-red-400',
-  '?': 'text-slate-600',
-}
-
-function RsiCell({ rsi }: { rsi: number | null }) {
-  if (rsi === null) return <span className="text-slate-600">—</span>
-  const color = rsi > 70 ? 'text-red-400 font-bold' : rsi < 40 ? 'text-green-400 font-bold' : 'text-slate-300'
-  return <span className={`font-mono ${color}`}>{rsi.toFixed(0)}</span>
-}
-
-function SmaCell({ above }: { above: boolean | null }) {
-  if (above === null) return <span className="text-slate-600">—</span>
-  return above ? <span className="text-green-400">▲</span> : <span className="text-red-400">▼</span>
-}
-
-function EarningsCell({ days, warning }: { days: number | null; warning: boolean }) {
-  if (days === null) return <span className="text-slate-700">—</span>
-  if (warning) return <span className="text-amber-400 font-bold inline-flex items-center gap-1">{days}d <WarningIcon /></span>
-  return <span className="text-slate-500">{days}d</span>
-}
-
-function FundamentalsCell({ fund }: { fund: Fundamentals | null }) {
-  if (!fund) return <span className="text-slate-700">—</span>
-  if (fund.is_etf) return <span className="text-slate-600 text-xs">ETF</span>
-
+function GradeChip({ fund }: { fund: Fundamentals | null }) {
+  if (!fund) return <span style={{ color: '#555' }}>—</span>
+  if (fund.is_etf) return <span className="text-xs" style={{ color: '#555' }}>ETF</span>
   const grade = fund.grade ?? '?'
   const tooltipLines = [
     fund.revenue_growth !== null ? `Rev: ${fund.revenue_growth > 0 ? '+' : ''}${fund.revenue_growth}%` : null,
@@ -62,216 +51,198 @@ function FundamentalsCell({ fund }: { fund: Fundamentals | null }) {
     fund.analyst_rating ? `Analysts: ${fund.analyst_rating.replace('_', ' ')}` : null,
     fund.upside_pct !== null ? `Target: ${fund.upside_pct > 0 ? '+' : ''}${fund.upside_pct}%` : null,
   ].filter(Boolean).join(' · ')
-
   return (
-    <div className="text-xs" title={tooltipLines}>
-      <span className={GRADE_STYLE[grade] ?? 'text-slate-400'}>{grade}</span>
-      <span className="text-slate-600 ml-1">{fund.score}/5</span>
-      {fund.upside_pct !== null && (
-        <div className={`text-xs ${fund.upside_pct > 10 ? 'text-green-500' : fund.upside_pct < 0 ? 'text-red-500' : 'text-slate-500'}`}>
-          {fund.upside_pct > 0 ? '+' : ''}{fund.upside_pct}% target
-        </div>
-      )}
+    <div title={tooltipLines}>
+      <span className="text-xs font-bold px-1.5 py-0.5 rounded" style={{
+        color: GRADE_COLOR[grade] ?? '#888',
+        background: 'rgba(255,255,255,0.05)',
+      }}>{grade}</span>
     </div>
   )
 }
 
 function RsCell({ rs }: { rs: RelativeStrength | null }) {
-  if (!rs || rs.rs_3m === null) return <span className="text-slate-700">—</span>
+  if (!rs || rs.rs_3m === null) return <span style={{ color: '#555' }}>—</span>
   const v = rs.rs_3m
-  const color = v > 5 ? 'text-green-400' : v < -10 ? 'text-red-400' : v < 0 ? 'text-yellow-500' : 'text-slate-300'
-  return (
-    <div className="text-xs">
-      <span className={`font-mono ${color}`}>{v > 0 ? '+' : ''}{v}%</span>
-      <span className="text-slate-600 ml-1">vs SPY</span>
-    </div>
-  )
+  const color = v > 5 ? 'var(--green)' : v < -10 ? 'var(--red)' : v < 0 ? 'var(--yellow)' : '#aaa'
+  return <span className="text-xs font-mono" style={{ color }}>{v > 0 ? '+' : ''}{v}%</span>
 }
 
-function ActionCell({ item }: { item: SignalItem }) {
-  const { signal, analysis, position_size } = item
-  if (signal.action !== 'BUY' || !position_size) {
-    return <span className="text-slate-500 text-xs leading-relaxed">{signal.suggested_action}</span>
-  }
+function EarningsWarning({ days, warning }: { days: number | null; warning: boolean }) {
+  if (!warning || days === null) return null
   return (
-    <div className="text-xs space-y-0.5">
-      <div className="text-teal-400 font-bold">{position_size.shares.toFixed(3)} shares</div>
-      <div className="text-slate-400">S${position_size.position_value_sgd.toFixed(0)} · risk S${position_size.risk_sgd.toFixed(0)}</div>
-      <div className="text-slate-500">Stop ${analysis.stop_loss.toFixed(2)} → ${analysis.profit_target.toFixed(2)}</div>
-      {position_size.note && <div className="text-slate-600 italic">{position_size.note}</div>}
-    </div>
+    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded" style={{
+      background: 'var(--amber-dim)', color: 'var(--amber)', border: '1px solid rgba(255,159,10,0.25)',
+    }}>
+      Earnings {days}d
+    </span>
   )
 }
 
 function SignalRow({ item }: { item: SignalItem }) {
-  const { symbol, in_portfolio, analysis, fundamentals, rel_strength, signal } = item
-  const dimmed = signal.action === 'SKIP'
+  const { symbol, in_portfolio, analysis, fundamentals, rel_strength, signal, position_size } = item
+  const badge = BADGE[signal.action]
 
   return (
-    <tr className={`border-b border-slate-800 transition-colors hover:bg-slate-900/40 ${dimmed ? 'opacity-40' : ''}`}>
-      <td className="px-4 py-3 whitespace-nowrap">
-        <div className="flex items-center gap-2">
-          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${PRIORITY_DOT[signal.priority]}`} />
-          <span className="font-bold text-slate-100">{symbol}</span>
-          {in_portfolio && (
-            <span className="text-xs bg-teal-900/60 text-teal-300 px-1.5 py-0.5 rounded">HELD</span>
-          )}
-        </div>
-      </td>
-      <td className="px-4 py-3 font-mono text-slate-300 whitespace-nowrap">
-        ${analysis.price.toFixed(2)}
-      </td>
-      <td className="px-4 py-3 whitespace-nowrap hidden sm:table-cell">
-        <RsiCell rsi={analysis.rsi} />
-      </td>
-      <td className="px-4 py-3 whitespace-nowrap hidden sm:table-cell">
-        <SmaCell above={analysis.above_200sma} />
-      </td>
-      <td className="px-4 py-3 whitespace-nowrap hidden md:table-cell">
-        <EarningsCell days={analysis.days_to_earnings} warning={analysis.earnings_warning} />
-      </td>
-      <td className="px-4 py-3 hidden md:table-cell">
-        <FundamentalsCell fund={fundamentals ?? null} />
-      </td>
-      <td className="px-4 py-3 hidden lg:table-cell">
-        <RsCell rs={rel_strength ?? null} />
-      </td>
-      <td className="px-4 py-3 whitespace-nowrap">
-        <span className={`text-xs font-bold px-2 py-1 rounded ${ACTION_STYLE[signal.action]}`}>
-          {signal.action.replace('_', ' ')}
-        </span>
-      </td>
-      <td className="px-4 py-3 text-xs text-slate-400 max-w-xs hidden lg:table-cell">
-        {signal.reasons[0]}
-      </td>
-      <td className="px-4 py-3 min-w-[180px]">
-        <ActionCell item={item} />
-      </td>
-    </tr>
-  )
-}
-
-function MobileSignalCard({ item }: { item: SignalItem }) {
-  const { symbol, in_portfolio, analysis, fundamentals, signal, position_size } = item
-  const dimmed = signal.action === 'SKIP'
-  const borderColor: Record<SignalAction, string> = {
-    BUY: 'border-l-green-500', SELL: 'border-l-red-500', SELL_HALF: 'border-l-orange-500',
-    REVIEW: 'border-l-amber-500', HOLD: 'border-l-slate-700', WATCH: 'border-l-yellow-500', SKIP: 'border-l-slate-800',
-  }
-
-  return (
-    <div className={`border-b border-slate-800 last:border-0 border-l-2 pl-3 pr-4 py-3 ${borderColor[signal.action]} ${dimmed ? 'opacity-40' : ''}`}>
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${PRIORITY_DOT[signal.priority]}`} />
-          <span className="font-bold text-slate-100 font-mono">{symbol}</span>
-          {in_portfolio && <span className="text-xs bg-teal-900/60 text-teal-300 px-1.5 py-0.5 rounded">HELD</span>}
-        </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <span className="font-mono text-slate-300 text-sm">${analysis.price.toFixed(2)}</span>
-          <span className={`text-xs font-bold px-2 py-1 rounded ${ACTION_STYLE[signal.action]}`}>
+    <div
+      className="flex flex-wrap items-center gap-4 px-5 py-4 border-b last:border-0 transition-colors hover:bg-white/[0.02]"
+      style={{ borderColor: 'var(--border)' }}
+    >
+      {/* Left: ticker + badge */}
+      <div className="flex items-center gap-3 w-36 flex-shrink-0">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-white text-base">{symbol}</span>
+            {in_portfolio && (
+              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full"
+                style={{ background: 'var(--teal-dim)', color: 'var(--teal)', border: '1px solid rgba(0,212,170,0.25)' }}>
+                HELD
+              </span>
+            )}
+          </div>
+          <span
+            className="text-[11px] font-bold px-2 py-0.5 rounded-full mt-1 inline-block"
+            style={{ color: badge.color, background: badge.bg, border: `1px solid ${badge.border}` }}
+          >
             {signal.action.replace('_', ' ')}
           </span>
         </div>
       </div>
 
-      <div className="mt-2 flex items-center gap-3 text-xs text-slate-500">
-        {analysis.rsi !== null && <RsiCell rsi={analysis.rsi} />}
-        <SmaCell above={analysis.above_200sma} />
-        {fundamentals && !fundamentals.is_etf && (
-          <span className={GRADE_STYLE[fundamentals.grade ?? '?'] ?? 'text-slate-400'}>
-            {fundamentals.grade ?? '?'}
-          </span>
-        )}
+      {/* Price */}
+      <div className="flex-shrink-0 w-20">
+        <div className="text-sm font-mono font-semibold text-white">${analysis.price.toFixed(2)}</div>
+        <div className="text-[11px] font-mono mt-0.5" style={{ color: '#555' }}>USD</div>
+      </div>
+
+      {/* Signals cluster */}
+      <div className="flex items-center gap-5 flex-1 min-w-0">
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider" style={{ color: '#555' }}>Momentum</div>
+          <RsiBar rsi={analysis.rsi} />
+        </div>
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider" style={{ color: '#555' }}>Trend</div>
+          <TrendIcon above={analysis.above_200sma} />
+        </div>
+        <div className="space-y-1 hidden sm:block">
+          <div className="text-[10px] uppercase tracking-wider" style={{ color: '#555' }}>Health</div>
+          <GradeChip fund={fundamentals ?? null} />
+        </div>
+        <div className="space-y-1 hidden md:block">
+          <div className="text-[10px] uppercase tracking-wider" style={{ color: '#555' }}>vs SPY</div>
+          <RsCell rs={rel_strength ?? null} />
+        </div>
         {analysis.earnings_warning && (
-          <span className="text-amber-400 inline-flex items-center gap-1">
-            <WarningIcon /> {analysis.days_to_earnings}d
-          </span>
+          <div className="hidden sm:block">
+            <EarningsWarning days={analysis.days_to_earnings} warning={analysis.earnings_warning} />
+          </div>
         )}
       </div>
 
-      {signal.reasons[0] && (
-        <div className="mt-1.5 text-xs text-slate-500 leading-relaxed">{signal.reasons[0]}</div>
-      )}
-
-      {signal.action === 'BUY' && position_size ? (
-        <div className="mt-2 text-xs space-y-0.5">
-          <div className="text-teal-400 font-bold">{position_size.shares.toFixed(3)} shares</div>
-          <div className="text-slate-400">S${position_size.position_value_sgd.toFixed(0)} · risk S${position_size.risk_sgd.toFixed(0)}</div>
-          <div className="text-slate-500">Stop ${analysis.stop_loss.toFixed(2)} → ${analysis.profit_target.toFixed(2)}</div>
-        </div>
-      ) : signal.action !== 'SKIP' && signal.action !== 'HOLD' ? (
-        <div className="mt-1.5 text-xs text-slate-400">{signal.suggested_action}</div>
-      ) : null}
+      {/* Action */}
+      <div className="text-xs leading-relaxed max-w-[200px] hidden lg:block" style={{ color: '#888' }}>
+        {signal.action === 'BUY' && position_size ? (
+          <div className="space-y-0.5">
+            <div className="font-mono font-semibold" style={{ color: 'var(--teal)' }}>
+              {position_size.shares.toFixed(3)} shares
+            </div>
+            <div style={{ color: '#666' }}>
+              Stop ${analysis.stop_loss.toFixed(2)} → ${analysis.profit_target.toFixed(2)}
+            </div>
+          </div>
+        ) : (
+          signal.suggested_action
+        )}
+      </div>
     </div>
   )
 }
 
+const FILTER_TABS: { id: FilterTab; label: string }[] = [
+  { id: 'all',        label: 'Active' },
+  { id: 'actionable', label: 'Actionable' },
+  { id: 'watching',   label: 'Watching' },
+  { id: 'hold',       label: 'Hold' },
+]
+
+const ACTIONABLE: SignalAction[] = ['BUY', 'SELL', 'SELL_HALF', 'REVIEW']
+
 export function SignalsTable({ signals }: { signals: SignalsResponse }) {
+  const [filter, setFilter] = useState<FilterTab>('all')
+
+  const sorted = [
+    ...signals.signals.filter(s => ACTIONABLE.includes(s.signal.action)),
+    ...signals.signals.filter(s => s.signal.action === 'WATCH'),
+    ...signals.signals.filter(s => s.signal.action === 'HOLD'),
+  ]
+
+  const filtered = filter === 'all'        ? sorted
+    : filter === 'actionable' ? sorted.filter(s => ACTIONABLE.includes(s.signal.action))
+    : filter === 'watching'   ? sorted.filter(s => s.signal.action === 'WATCH')
+    :                           sorted.filter(s => s.signal.action === 'HOLD')
+
   const counts = signals.signals.reduce<Record<string, number>>((acc, s) => {
     acc[s.signal.action] = (acc[s.signal.action] || 0) + 1
     return acc
   }, {})
-
-  const actionable: SignalAction[] = ['BUY', 'SELL', 'SELL_HALF', 'REVIEW']
-  const sorted = [
-    ...signals.signals.filter(s => actionable.includes(s.signal.action)),
-    ...signals.signals.filter(s => s.signal.action === 'WATCH'),
-    ...signals.signals.filter(s => s.signal.action === 'HOLD'),
-    ...signals.signals.filter(s => s.signal.action === 'SKIP'),
-  ]
+  const actionableCount = ACTIONABLE.reduce((n, a) => n + (counts[a] ?? 0), 0)
 
   return (
-    <div className="bg-[#1a1d2e] rounded-lg border border-slate-800">
-      <div className="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center gap-3 justify-between">
-        <h2 className="text-xs font-bold text-slate-300 tracking-widest uppercase">Signals</h2>
-        <div className="flex flex-wrap gap-2">
-          {(['BUY', 'SELL', 'SELL_HALF', 'WATCH', 'REVIEW'] as SignalAction[]).map(a => {
-            const n = counts[a]
-            if (!n) return null
+    <div className="rounded-2xl border overflow-hidden" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+      {/* Header */}
+      <div className="px-5 py-4 border-b flex flex-wrap items-center justify-between gap-3"
+        style={{ borderColor: 'var(--border)' }}>
+        <h2 className="text-sm font-semibold" style={{ color: '#888' }}>Signals</h2>
+
+        {/* Filter tabs */}
+        <div className="flex gap-1 p-1 rounded-xl" style={{ background: 'var(--surface-2)' }}>
+          {FILTER_TABS.map(t => {
+            const count = t.id === 'actionable' ? actionableCount
+              : t.id === 'watching' ? (counts['WATCH'] ?? 0)
+              : t.id === 'hold' ? (counts['HOLD'] ?? 0)
+              : signals.signals.filter(s => s.signal.action !== 'SKIP').length
             return (
-              <span key={a} className={`text-xs px-2 py-0.5 rounded ${ACTION_STYLE[a]}`}>
-                {n} {a.replace('_', ' ')}
-              </span>
+              <button
+                key={t.id}
+                onClick={() => setFilter(t.id)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer"
+                style={filter === t.id
+                  ? { background: 'var(--surface)', color: 'white' }
+                  : { color: '#666' }
+                }
+              >
+                {t.label}
+                {count > 0 && (
+                  <span className="ml-1.5 text-[10px]" style={{ color: filter === t.id ? '#aaa' : '#444' }}>
+                    {count}
+                  </span>
+                )}
+              </button>
             )
           })}
         </div>
       </div>
 
-      {/* Mobile card layout */}
-      <div className="sm:hidden divide-y divide-slate-800">
-        {sorted.map(item => <MobileSignalCard key={item.symbol} item={item} />)}
+      {/* List */}
+      <div>
+        {filtered.length === 0 ? (
+          <div className="py-10 text-center text-sm" style={{ color: '#555' }}>
+            No signals in this category
+          </div>
+        ) : (
+          filtered.map(item => <SignalRow key={item.symbol} item={item} />)
+        )}
       </div>
 
-      {/* Desktop table layout */}
-      <div className="hidden sm:block overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-slate-800 text-slate-600 text-xs uppercase tracking-wider">
-              <th className="px-4 py-2 text-left font-medium">Stock</th>
-              <th className="px-4 py-2 text-left font-medium">Price</th>
-              <th className="px-4 py-2 text-left font-medium" title="RSI: below 40 = oversold (cheap), above 70 = overbought (expensive)">Momentum</th>
-              <th className="px-4 py-2 text-left font-medium" title="Is the stock above its 200-day average? Up = healthy trend, Down = broken">Trend</th>
-              <th className="px-4 py-2 text-left font-medium hidden md:table-cell" title="Days until next earnings report">Earnings</th>
-              <th className="px-4 py-2 text-left font-medium hidden md:table-cell" title="Company financial health graded A–D">Health</th>
-              <th className="px-4 py-2 text-left font-medium hidden lg:table-cell" title="How this stock performed vs the S&P 500 over 3 months">vs Market</th>
-              <th className="px-4 py-2 text-left font-medium">Signal</th>
-              <th className="px-4 py-2 text-left font-medium hidden lg:table-cell">Why</th>
-              <th className="px-4 py-2 text-left font-medium">What to do</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map(item => <SignalRow key={item.symbol} item={item} />)}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="px-4 py-2 border-t border-slate-800 text-xs text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
+      {/* Footer */}
+      <div className="px-5 py-3 border-t flex flex-wrap gap-x-5 gap-y-1 text-[11px]"
+        style={{ borderColor: 'var(--border)', color: '#444' }}>
         <span>Updated {new Date(signals.generated_at).toLocaleString('en-SG')}</span>
-        <span className="hidden sm:inline">Momentum: &lt;40 oversold · &gt;70 overbought</span>
-        <span className="hidden sm:inline">Health grade: A = strong · B = good · C = weak · D = avoid</span>
+        <span className="hidden sm:inline">RSI &lt;40 oversold · &gt;70 overbought</span>
+        <span className="hidden sm:inline">Health A=strong · D=avoid</span>
         {signals.regime.new_position_size_multiplier < 1 && (
-          <span className="text-yellow-600 inline-flex items-center gap-1"><WarningIcon /> Use half position size — market is risky</span>
+          <span style={{ color: 'var(--orange)' }}>Use half position size — market is risky</span>
         )}
       </div>
     </div>

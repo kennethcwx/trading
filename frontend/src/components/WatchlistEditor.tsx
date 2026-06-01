@@ -46,31 +46,35 @@ export function WatchlistEditor({ onSave }: { onSave?: () => void }) {
   }
 
   return (
-    <div className="bg-[#1a1d2e] rounded-lg border border-slate-800">
-      <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-        <h2 className="text-xs font-bold text-slate-300 tracking-widest uppercase">Watchlist</h2>
-        <span className="text-xs text-slate-600">{watchlist.length} stocks · US tickers only</span>
+    <div className="rounded-2xl border overflow-hidden" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+      <div className="px-5 py-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border)' }}>
+        <h2 className="text-sm font-semibold" style={{ color: '#888' }}>Watchlist</h2>
+        <span className="text-xs" style={{ color: '#555' }}>{watchlist.length} stocks · US tickers only</span>
       </div>
 
-      <div className="p-4">
+      <div className="p-5">
         {loading ? (
-          <div className="text-xs text-slate-500 py-2">Loading…</div>
+          <div className="text-sm py-2" style={{ color: '#555' }}>Loading…</div>
         ) : (
           <>
-            <div className="flex flex-wrap gap-2 mb-4 min-h-[32px]">
+            <div className="flex flex-wrap gap-2 mb-4 min-h-[36px]">
               {watchlist.length === 0 && (
-                <span className="text-xs text-slate-600">No stocks — add some below</span>
+                <span className="text-sm" style={{ color: '#555' }}>No stocks — add some below</span>
               )}
               {watchlist.map(sym => (
                 <span
                   key={sym}
-                  className="inline-flex items-center gap-1 bg-slate-800 text-slate-200 text-xs pl-2.5 pr-1 py-1 rounded border border-slate-700"
+                  className="inline-flex items-center gap-1 pl-3 pr-1 py-1 rounded-full text-xs"
+                  style={{ background: 'var(--surface-2)', border: '1px solid var(--border-2)', color: '#ccc' }}
                 >
                   <span className="font-bold font-mono">{sym}</span>
                   <button
                     onClick={() => remove(sym)}
                     disabled={saving}
-                    className="flex items-center justify-center w-6 h-6 text-slate-500 hover:text-red-400 disabled:opacity-40 transition-colors cursor-pointer rounded"
+                    className="flex items-center justify-center w-5 h-5 rounded-full text-sm transition-colors cursor-pointer disabled:opacity-40"
+                    style={{ color: '#555' }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'var(--red)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = '#555')}
                     aria-label={`Remove ${sym}`}
                   >
                     ×
@@ -85,24 +89,23 @@ export function WatchlistEditor({ onSave }: { onSave?: () => void }) {
                 value={input}
                 onChange={e => { setInput(e.target.value.toUpperCase()); setError(null) }}
                 onKeyDown={e => e.key === 'Enter' && add()}
-                placeholder="AAPL, VOO, TSLA…"
+                placeholder="Add ticker…"
                 maxLength={6}
-                className="bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-xs text-slate-200 font-mono w-36 focus:outline-none focus:border-teal-500"
+                className="flex-1 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none"
+                style={{ background: 'var(--surface-2)', border: '1px solid var(--border-2)', color: '#e5e5e5' }}
               />
               <button
                 onClick={add}
                 disabled={saving || !input.trim()}
-                className="text-xs bg-teal-700 hover:bg-teal-600 disabled:opacity-40 px-3 py-1.5 rounded text-white transition-colors cursor-pointer"
+                className="px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer disabled:opacity-40 transition-colors"
+                style={{ background: 'var(--teal)', color: '#000' }}
               >
                 {saving ? '…' : 'Add'}
               </button>
             </div>
 
-            {error && <div className="text-xs text-red-400 mt-2">{error}</div>}
-
-            <div className="text-xs text-slate-700 mt-3">
-              Changes take effect on next Refresh
-            </div>
+            {error && <div className="text-xs mt-2" style={{ color: 'var(--red)' }}>{error}</div>}
+            <div className="text-xs mt-3" style={{ color: '#444' }}>Changes take effect on next Refresh</div>
           </>
         )}
       </div>

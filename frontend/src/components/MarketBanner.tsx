@@ -1,64 +1,61 @@
 import type { MarketRegime } from '../types'
 
-function WarningIcon() {
+function VixBar({ status }: { status: string }) {
+  const pct = status === 'EXTREME' ? 90 : status === 'ELEVATED' ? 55 : 20
+  const color = status === 'EXTREME' ? 'var(--red)' : status === 'ELEVATED' ? 'var(--yellow)' : 'var(--green)'
+  const label = status === 'EXTREME' ? 'Very High' : status === 'ELEVATED' ? 'Elevated' : 'Low'
   return (
-    <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-    </svg>
+    <div className="flex items-center gap-2">
+      <span className="text-xs" style={{ color: '#888' }}>Fear</span>
+      <div className="w-20 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-2)' }}>
+        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+      </div>
+      <span className="text-xs font-medium" style={{ color }}>{label}</span>
+    </div>
   )
 }
 
 export function MarketBanner({ regime }: { regime: MarketRegime }) {
   const bullish = regime.regime_ok
-
-  const vixLabel =
-    regime.vix_status === 'EXTREME' ? 'Very High' :
-    regime.vix_status === 'ELEVATED' ? 'Elevated' :
-    'Low'
-
-  const vixColor =
-    regime.vix_status === 'EXTREME' ? 'text-red-400' :
-    regime.vix_status === 'ELEVATED' ? 'text-yellow-400' :
-    'text-green-400'
-
-  const vixBadge =
-    regime.vix_status === 'EXTREME' ? 'bg-red-900/60 text-red-300' :
-    regime.vix_status === 'ELEVATED' ? 'bg-yellow-900/60 text-yellow-300' :
-    'bg-green-900/60 text-green-300'
+  const statusColor = bullish ? 'var(--green)' : 'var(--red)'
+  const statusBg = bullish ? 'var(--green-dim)' : 'var(--red-dim)'
+  const statusBorder = bullish ? 'rgba(0,200,5,0.2)' : 'rgba(255,59,48,0.2)'
 
   return (
-    <div className={`px-4 sm:px-6 py-2.5 border-b text-xs ${
-      bullish ? 'bg-green-950/20 border-green-900/40' : 'bg-red-950/20 border-red-900/40'
-    }`}>
-      <div className="flex flex-wrap gap-x-6 gap-y-1.5 items-center">
-        {/* Market health */}
-        <div className="flex items-center gap-2">
-          <span className={`font-bold text-sm ${bullish ? 'text-green-400' : 'text-red-400'}`}>
-            {bullish ? '▲ Healthy' : '▼ Weak'}
-          </span>
-          <span className="text-slate-600">
-            {bullish ? 'New buys OK' : 'Avoid new positions'}
-          </span>
+    <div className="rounded-2xl border p-4" style={{ background: statusBg, borderColor: statusBorder }}>
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        {/* Regime status */}
+        <div className="flex items-center gap-3">
+          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: statusColor }} />
+          <div>
+            <div className="font-semibold text-sm" style={{ color: statusColor }}>
+              Market {bullish ? 'Healthy' : 'Weak'}
+            </div>
+            <div className="text-xs mt-0.5" style={{ color: '#888' }}>
+              {bullish ? 'New positions OK' : 'Avoid new entries'}
+            </div>
+          </div>
         </div>
 
-        {/* Fear level */}
-        <div className="flex items-center gap-2">
-          <span className="text-slate-500">Fear:</span>
-          <span className={`font-bold ${vixColor}`}>{vixLabel}</span>
-          <span className={`px-1.5 py-0.5 rounded font-mono ${vixBadge}`}>
-            VIX {regime.vix.toFixed(1)}
-          </span>
+        {/* VIX bar */}
+        <div className="flex flex-col gap-1">
+          <VixBar status={regime.vix_status} />
+          <span className="text-[11px] font-mono" style={{ color: '#555' }}>VIX {regime.vix.toFixed(1)}</span>
         </div>
 
-        {/* Size warning */}
+        {/* Half size warning */}
         {regime.new_position_size_multiplier < 1 && (
-          <div className="flex items-center gap-1.5 text-yellow-400 font-medium">
-            <WarningIcon />
-            <span>Use half position size</span>
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium"
+            style={{ background: 'var(--orange-dim)', color: 'var(--orange)', border: '1px solid rgba(255,149,0,0.25)' }}>
+            <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 5zm0 7a1 1 0 1 1 0-2 1 1 0 0 1 0 2z" />
+            </svg>
+            Use half position size
           </div>
         )}
 
-        <div className="text-slate-700 ml-auto hidden sm:block">
+        {/* FX rate */}
+        <div className="ml-auto text-xs font-mono hidden sm:block" style={{ color: '#555' }}>
           SGD/USD {regime.sgd_to_usd.toFixed(4)}
         </div>
       </div>

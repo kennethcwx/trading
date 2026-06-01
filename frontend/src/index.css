@@ -2,13 +2,41 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  background-color: #0f1117;
-  color: #e2e8f0;
-  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', ui-monospace, monospace;
-  font-size: 14px;
+:root {
+  --bg:        #0f0f0f;
+  --surface:   #161616;
+  --surface-2: #1e1e1e;
+  --border:    #2a2a2a;
+  --border-2:  #333333;
+
+  --green:     #00C805;
+  --green-dim: rgba(0, 200, 5, 0.12);
+  --red:       #FF3B30;
+  --red-dim:   rgba(255, 59, 48, 0.12);
+  --orange:    #FF9500;
+  --orange-dim:rgba(255, 149, 0, 0.12);
+  --yellow:    #FFD60A;
+  --yellow-dim:rgba(255, 214, 10, 0.12);
+  --amber:     #FF9F0A;
+  --amber-dim: rgba(255, 159, 10, 0.12);
+  --teal:      #00D4AA;
+  --teal-dim:  rgba(0, 212, 170, 0.12);
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #1a1d2e; }
-::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+body {
+  background-color: var(--bg);
+  color: #e5e5e5;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-mono, code, .tabular {
+  font-family: 'Fira Code', 'Consolas', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #444; }

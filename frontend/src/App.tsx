@@ -13,24 +13,173 @@ import { fetchTrades } from './api'
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000
 
-function marketStatus(): { label: string; color: string } {
+type Tab = 'dashboard' | 'signals' | 'trades'
+
+function marketStatus(): { label: string; dot: string } {
   const now = new Date()
   const day = now.getUTCDay()
-  const hour = now.getUTCHours()
-  const min = now.getUTCMinutes()
-  const mins = hour * 60 + min
+  const mins = now.getUTCHours() * 60 + now.getUTCMinutes()
   const isWeekday = day >= 1 && day <= 5
-  const openMins = 13 * 60 + 30  // 09:30 ET = 13:30 UTC
-  const closeMins = 20 * 60       // 16:00 ET = 20:00 UTC
-  const preMarket = 9 * 60        // 05:00 ET = 09:00 UTC
+  const openMins = 13 * 60 + 30
+  const closeMins = 20 * 60
+  const preMarket = 9 * 60
 
-  if (!isWeekday) return { label: 'Market Closed', color: 'text-slate-500' }
-  if (mins >= openMins && mins < closeMins) return { label: 'Market Open', color: 'text-green-400' }
-  if (mins >= preMarket && mins < openMins) return { label: 'Pre-Market', color: 'text-yellow-500' }
-  return { label: 'Market Closed', color: 'text-slate-500' }
+  if (!isWeekday) return { label: 'Closed', dot: 'bg-zinc-600' }
+  if (mins >= openMins && mins < closeMins) return { label: 'Open', dot: 'bg-[var(--green)]' }
+  if (mins >= preMarket && mins < openMins) return { label: 'Pre-market', dot: 'bg-yellow-400' }
+  return { label: 'Closed', dot: 'bg-zinc-600' }
 }
 
+// ── Icons ─────────────────────────────────────────────────────────────────────
+
+function IconGrid() {
+  return (
+    <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="1" y="1" width="6" height="6" rx="1" />
+      <rect x="9" y="1" width="6" height="6" rx="1" />
+      <rect x="1" y="9" width="6" height="6" rx="1" />
+      <rect x="9" y="9" width="6" height="6" rx="1" />
+    </svg>
+  )
+}
+
+function IconSignal() {
+  return (
+    <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M1 12 L4 8 L7 10 L10 5 L13 7 L15 4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function IconTrades() {
+  return (
+    <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M2 8h12M10 4l4 4-4 4M6 12l-4-4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function IconRefresh({ spinning }: { spinning: boolean }) {
+  return (
+    <svg
+      className={`w-3.5 h-3.5 ${spinning ? 'animate-spin' : ''}`}
+      viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
+    >
+      <path d="M13.5 8A5.5 5.5 0 1 1 8 2.5a5.5 5.5 0 0 1 4 1.7L14 6" strokeLinecap="round" />
+      <path d="M14 2.5V6h-3.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+// ── Sidebar (desktop) ─────────────────────────────────────────────────────────
+
+function Sidebar({
+  tab, setTab, status, loading, lastRefresh, onRefresh,
+}: {
+  tab: Tab
+  setTab: (t: Tab) => void
+  status: ReturnType<typeof marketStatus>
+  loading: boolean
+  lastRefresh: Date | null
+  onRefresh: () => void
+}) {
+  const nav: { id: Tab; label: string; icon: React.ReactNode }[] = [
+    { id: 'dashboard', label: 'Dashboard', icon: <IconGrid /> },
+    { id: 'signals',   label: 'Signals',   icon: <IconSignal /> },
+    { id: 'trades',    label: 'Trades',    icon: <IconTrades /> },
+  ]
+
+  return (
+    <aside className="hidden md:flex flex-col fixed left-0 top-0 h-full w-52 border-r z-20"
+      style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+      {/* Logo */}
+      <div className="px-5 py-5 border-b flex items-center gap-2.5" style={{ borderColor: 'var(--border)' }}>
+        <div className="w-7 h-7 rounded-lg flex items-center justify-center text-black text-xs font-bold"
+          style={{ background: 'var(--teal)' }}>T</div>
+        <div>
+          <div className="text-sm font-semibold text-white leading-none">Trading</div>
+          <div className="text-[10px] mt-0.5" style={{ color: 'var(--teal)' }}>PAPER ACCOUNT</div>
+        </div>
+      </div>
+
+      {/* Nav */}
+      <nav className="flex-1 px-3 py-4 space-y-0.5">
+        {nav.map(item => (
+          <button
+            key={item.id}
+            onClick={() => setTab(item.id)}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all cursor-pointer relative"
+            style={tab === item.id
+              ? { background: 'var(--surface-2)', color: 'var(--teal)' }
+              : { color: '#888' }
+            }
+          >
+            {tab === item.id && (
+              <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 rounded-r"
+                style={{ background: 'var(--teal)' }} />
+            )}
+            {item.icon}
+            {item.label}
+          </button>
+        ))}
+      </nav>
+
+      {/* Bottom: status + refresh */}
+      <div className="px-4 py-4 border-t space-y-3" style={{ borderColor: 'var(--border)' }}>
+        <div className="flex items-center gap-2 text-xs">
+          <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`} />
+          <span className="text-zinc-400">Market {status.label}</span>
+        </div>
+        {lastRefresh && (
+          <div className="text-[11px] text-zinc-600">
+            Updated {lastRefresh.toLocaleTimeString('en-SG', { hour: '2-digit', minute: '2-digit' })}
+          </div>
+        )}
+        <button
+          onClick={onRefresh}
+          disabled={loading}
+          className="w-full flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-medium transition-colors cursor-pointer disabled:opacity-40"
+          style={{ background: 'var(--surface-2)', color: '#aaa' }}
+        >
+          <IconRefresh spinning={loading} />
+          Refresh data
+        </button>
+      </div>
+    </aside>
+  )
+}
+
+// ── Bottom nav (mobile) ───────────────────────────────────────────────────────
+
+function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
+  const nav: { id: Tab; label: string; icon: React.ReactNode }[] = [
+    { id: 'dashboard', label: 'Dashboard', icon: <IconGrid /> },
+    { id: 'signals',   label: 'Signals',   icon: <IconSignal /> },
+    { id: 'trades',    label: 'Trades',    icon: <IconTrades /> },
+  ]
+
+  return (
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-20 border-t flex"
+      style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+      {nav.map(item => (
+        <button
+          key={item.id}
+          onClick={() => setTab(item.id)}
+          className="flex-1 flex flex-col items-center gap-1 py-3 text-[10px] font-medium transition-colors cursor-pointer"
+          style={tab === item.id ? { color: 'var(--teal)' } : { color: '#666' }}
+        >
+          {item.icon}
+          {item.label}
+        </button>
+      ))}
+    </nav>
+  )
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+
 export default function App() {
+  const [tab, setTab] = useState<Tab>('dashboard')
   const [regime, setRegime] = useState<MarketRegime | null>(null)
   const [signals, setSignals] = useState<SignalsResponse | null>(null)
   const [options, setOptions] = useState<OptionsResponse | null>(null)
@@ -71,74 +220,70 @@ export default function App() {
   const status = marketStatus()
 
   return (
-    <div className="min-h-screen bg-[#0f1117] text-slate-200">
-      {/* Header */}
-      <header className="border-b border-slate-800 px-4 sm:px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-2 sm:gap-3">
-          <span className="text-teal-400 font-bold tracking-wider text-sm sm:text-base">TRADING DASHBOARD</span>
-          <span className="text-xs bg-slate-800 text-slate-500 px-2 py-0.5 rounded border border-slate-700">PAPER</span>
-        </div>
-        <div className="flex items-center gap-2 sm:gap-4">
-          <span className={`text-xs font-medium ${status.color} hidden sm:inline`}>
-            ● {status.label}
-          </span>
-          {lastRefresh && (
-            <span className="text-xs text-slate-600 hidden md:block">
-              {lastRefresh.toLocaleTimeString('en-SG')}
-            </span>
+    <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
+      <Sidebar tab={tab} setTab={setTab} status={status} loading={loading} lastRefresh={lastRefresh} onRefresh={() => void refresh(true)} />
+      <BottomNav tab={tab} setTab={setTab} />
+
+      {/* Main content — offset by sidebar on desktop, pad bottom for mobile nav */}
+      <main className="md:ml-52 pb-20 md:pb-0">
+        {/* Error bar */}
+        {error && (
+          <div className="px-6 py-3 text-xs text-red-300 border-b"
+            style={{ background: 'rgba(255,59,48,0.08)', borderColor: 'rgba(255,59,48,0.2)' }}>
+            {error}
+          </div>
+        )}
+
+        <div className="px-4 md:px-8 py-6 space-y-5 max-w-screen-xl mx-auto">
+          {/* Dashboard tab */}
+          {tab === 'dashboard' && (
+            <>
+              {regime && <MarketBanner regime={regime} />}
+              {signals && <ActionSummary signals={signals} />}
+              <PnLChart trades={trades} />
+
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+                <div className="xl:col-span-2">
+                  <WeeklyChecklist />
+                </div>
+                <div>
+                  <WatchlistEditor onSave={() => void refresh()} />
+                </div>
+              </div>
+
+              {options && <OptionsPanel options={options} />}
+            </>
           )}
-          <button
-            onClick={() => void refresh(true)}
-            disabled={loading}
-            className="text-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-40 px-4 py-2.5 sm:px-3 sm:py-1.5 rounded border border-slate-700 text-slate-300 transition-colors cursor-pointer min-w-[44px]"
-          >
-            {loading ? '…' : 'Refresh'}
-          </button>
-        </div>
-      </header>
 
-      {/* Error bar */}
-      {error && (
-        <div className="bg-red-950/60 border-b border-red-900 text-red-300 px-4 sm:px-6 py-2.5 text-xs">
-          {error}
-        </div>
-      )}
+          {/* Signals tab */}
+          {tab === 'signals' && (
+            <>
+              {regime && <MarketBanner regime={regime} />}
+              {signals
+                ? <SignalsTable signals={signals} />
+                : !loading && (
+                  <div className="rounded-2xl border p-8 text-sm text-center"
+                    style={{ background: 'var(--surface)', borderColor: 'var(--border)', color: '#555' }}>
+                    No signal data available
+                  </div>
+                )
+              }
+            </>
+          )}
 
-      {/* Market regime banner */}
-      {regime && <MarketBanner regime={regime} />}
+          {/* Trades tab */}
+          {tab === 'trades' && (
+            <>
+              <PnLChart trades={trades} />
+              <TradeLog onTradesChange={setTrades} />
+            </>
+          )}
 
-      <div className="p-3 sm:p-6 space-y-4 sm:space-y-5 max-w-screen-2xl mx-auto">
-        {/* Action summary */}
-        {signals && <ActionSummary signals={signals} />}
-
-        {/* Signals + right column */}
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 sm:gap-5">
-          <div className="xl:col-span-2">
-            {signals
-              ? <SignalsTable signals={signals} />
-              : !loading && <div className="bg-[#1a1d2e] rounded-lg border border-slate-800 p-6 text-slate-500 text-xs">No signal data</div>
-            }
-          </div>
-          <div className="space-y-4 sm:space-y-5">
-            <WeeklyChecklist />
-            <WatchlistEditor onSave={() => void refresh()} />
+          <div className="text-xs text-center pb-2" style={{ color: '#333' }}>
+            Auto-refreshes every 5 min · Data via Yahoo Finance · Not financial advice
           </div>
         </div>
-
-        {/* P&L Chart */}
-        <PnLChart trades={trades} />
-
-        {/* Options */}
-        {options && <OptionsPanel options={options} />}
-
-        {/* Trade Log */}
-        <TradeLog onTradesChange={setTrades} />
-
-        {/* Footer */}
-        <div className="text-xs text-slate-700 text-center pb-2">
-          Auto-refreshes every 5 min · Data via Yahoo Finance · Not financial advice
-        </div>
-      </div>
+      </main>
     </div>
   )
 }

@@ -5,13 +5,16 @@ import { fetchTrades, addTrade, closeTrade, deleteTrade } from '../api'
 const today = () => new Date().toISOString().split('T')[0]
 
 const pnlColor = (v: number | null | undefined) =>
-  v == null ? 'text-slate-400' : v >= 0 ? 'text-green-400' : 'text-red-400'
+  v == null ? '#888' : v >= 0 ? 'var(--green)' : 'var(--red)'
 
-const fmt = (v: number | null | undefined, prefix = '$') =>
-  v == null ? '—' : `${v >= 0 ? '+' : ''}${prefix}${Math.abs(v).toFixed(2)}`
+const fmt = (v: number | null | undefined) =>
+  v == null ? '—' : `${v >= 0 ? '+' : '-'}$${Math.abs(v).toFixed(2)}`
 
 const fmtPct = (v: number | null | undefined) =>
   v == null ? '' : ` (${v >= 0 ? '+' : ''}${v.toFixed(1)}%)`
+
+const inputCls = "w-full rounded-lg px-3 py-2 text-sm focus:outline-none transition-colors"
+const inputStyle = { background: 'var(--surface-2)', border: '1px solid var(--border-2)', color: '#e5e5e5' }
 
 function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => void }) {
   const [form, setForm] = useState({
@@ -31,14 +34,8 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
     }
     const shares = parseFloat(form.shares)
     const price = parseFloat(form.entry_price)
-    if (isNaN(shares) || shares <= 0) {
-      setError('Shares must be a positive number')
-      return
-    }
-    if (isNaN(price) || price <= 0) {
-      setError('Entry Price must be a positive number')
-      return
-    }
+    if (isNaN(shares) || shares <= 0) { setError('Shares must be a positive number'); return }
+    if (isNaN(price) || price <= 0) { setError('Entry Price must be a positive number'); return }
     setSaving(true)
     setError(null)
     try {
@@ -52,34 +49,39 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
       })
       onSave()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save trade — check backend is running')
+      setError(err instanceof Error ? err.message : 'Failed to save — check backend is running')
     } finally {
       setSaving(false)
     }
   }
 
+  const fields = [
+    { label: 'Symbol',          key: 'symbol',        placeholder: 'AAPL',         required: true },
+    { label: 'Shares',          key: 'shares',        placeholder: '1.5',          required: true },
+    { label: 'Entry Date',      key: 'entry_date',    placeholder: '',             required: false },
+    { label: 'Entry Price (USD)',key: 'entry_price',   placeholder: '182.50',       required: true },
+    { label: 'Signal (optional)',key: 'signal_reason', placeholder: 'RSI <40 + SMA',required: false },
+    { label: 'Notes (optional)', key: 'notes',         placeholder: '',             required: false },
+  ]
+
   return (
-    <form onSubmit={e => void handleSubmit(e)} className="bg-slate-900 border border-slate-700 rounded-lg p-4 mb-4">
-      <div className="text-xs font-bold text-slate-300 uppercase tracking-widest mb-3">Log New Trade</div>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
-        {[
-          { label: 'Symbol', key: 'symbol', placeholder: 'AAPL', required: true },
-          { label: 'Shares', key: 'shares', placeholder: '1.5', required: true },
-          { label: 'Entry Date', key: 'entry_date', placeholder: '', required: false },
-          { label: 'Entry Price (USD)', key: 'entry_price', placeholder: '182.50', required: true },
-          { label: 'Signal (optional)', key: 'signal_reason', placeholder: 'RSI <40 + 200 SMA', required: false },
-          { label: 'Notes (optional)', key: 'notes', placeholder: '', required: false },
-        ].map(({ label, key, placeholder, required }) => (
+    <form onSubmit={e => void handleSubmit(e)}
+      className="rounded-2xl border p-5 mb-5"
+      style={{ background: 'var(--surface-2)', borderColor: 'var(--border-2)' }}>
+      <div className="text-sm font-semibold text-white mb-4">Log New Trade</div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+        {fields.map(({ label, key, placeholder, required }) => (
           <div key={key}>
-            <label className="block text-xs text-slate-500 mb-1">
-              {label}{required && <span className="text-red-400 ml-0.5">*</span>}
+            <label className="block text-xs mb-1.5" style={{ color: '#888' }}>
+              {label}{required && <span className="ml-0.5" style={{ color: 'var(--red)' }}>*</span>}
             </label>
             <input
               type={key.includes('date') ? 'date' : 'text'}
               value={form[key as keyof typeof form]}
               onChange={set(key)}
               placeholder={placeholder}
-              className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-teal-500"
+              className={inputCls}
+              style={inputStyle}
             />
           </div>
         ))}
@@ -88,18 +90,17 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
         <button
           type="submit"
           disabled={saving}
-          className="text-xs bg-teal-700 hover:bg-teal-600 disabled:opacity-40 px-3 py-1.5 rounded text-white transition-colors cursor-pointer"
+          className="px-5 py-2 rounded-lg text-sm font-semibold transition-colors cursor-pointer disabled:opacity-40"
+          style={{ background: 'var(--green)', color: '#000' }}
         >
           {saving ? 'Saving…' : 'Log Trade'}
         </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="text-xs bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded border border-slate-700 text-slate-400 transition-colors cursor-pointer"
-        >
+        <button type="button" onClick={onCancel}
+          className="px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer"
+          style={{ background: 'var(--surface)', border: '1px solid var(--border-2)', color: '#888' }}>
           Cancel
         </button>
-        {error && <span className="text-xs text-red-400">{error}</span>}
+        {error && <span className="text-xs" style={{ color: 'var(--red)' }}>{error}</span>}
       </div>
     </form>
   )
@@ -130,44 +131,106 @@ function CloseForm({ trade, onSave, onCancel }: { trade: Trade; onSave: () => vo
       })
       onSave()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to close trade — check backend is running')
+      setError(err instanceof Error ? err.message : 'Failed to close trade')
     } finally {
       setSaving(false)
     }
   }
 
   return (
-    <form onSubmit={e => void handleSubmit(e)} className="bg-slate-900/80 border border-slate-700 rounded p-3 mt-2">
-      <div className="text-xs text-slate-400 mb-2">Close {trade.symbol} — enter exit details</div>
-      <div className="flex gap-2 flex-wrap">
-        <div>
-          <label className="block text-xs text-slate-500 mb-1">Exit Date</label>
-          <input type="date" value={form.exit_date} onChange={set('exit_date')}
-            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-teal-500" />
-        </div>
-        <div>
-          <label className="block text-xs text-slate-500 mb-1">Exit Price (USD)</label>
-          <input type="text" value={form.exit_price} onChange={set('exit_price')} placeholder="195.00"
-            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 w-28 focus:outline-none focus:border-teal-500" />
-        </div>
-        <div>
-          <label className="block text-xs text-slate-500 mb-1">Notes</label>
-          <input type="text" value={form.notes} onChange={set('notes')} placeholder="RSI >70 exit"
-            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 w-40 focus:outline-none focus:border-teal-500" />
-        </div>
+    <form onSubmit={e => void handleSubmit(e)}
+      className="rounded-xl border p-4 mt-3"
+      style={{ background: 'var(--surface)', borderColor: 'var(--border-2)' }}>
+      <div className="text-xs font-medium mb-3" style={{ color: '#888' }}>
+        Close {trade.symbol} — enter exit details
       </div>
-      <div className="flex gap-2 mt-2 items-center flex-wrap">
+      <div className="flex flex-wrap gap-3">
+        {[
+          { label: 'Exit Date',       key: 'exit_date',   type: 'date',   placeholder: '' },
+          { label: 'Exit Price (USD)', key: 'exit_price',  type: 'text',   placeholder: '195.00' },
+          { label: 'Notes',            key: 'notes',       type: 'text',   placeholder: 'RSI >70 exit' },
+        ].map(({ label, key, type, placeholder }) => (
+          <div key={key}>
+            <label className="block text-[11px] mb-1" style={{ color: '#666' }}>{label}</label>
+            <input type={type} value={form[key as keyof typeof form]} onChange={set(key)}
+              placeholder={placeholder}
+              className="rounded-lg px-3 py-1.5 text-xs focus:outline-none"
+              style={{ ...inputStyle, width: key === 'notes' ? '160px' : key === 'exit_price' ? '110px' : 'auto' }} />
+          </div>
+        ))}
+      </div>
+      <div className="flex gap-2 mt-3 items-center">
         <button type="submit" disabled={saving}
-          className="text-xs bg-teal-700 hover:bg-teal-600 disabled:opacity-40 px-3 py-1 rounded text-white transition-colors cursor-pointer">
+          className="px-4 py-1.5 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-40"
+          style={{ background: 'var(--green)', color: '#000' }}>
           {saving ? 'Saving…' : 'Confirm Close'}
         </button>
         <button type="button" onClick={onCancel}
-          className="text-xs bg-slate-800 hover:bg-slate-700 px-3 py-1 rounded border border-slate-700 text-slate-400 transition-colors cursor-pointer">
+          className="px-3 py-1.5 rounded-lg text-xs cursor-pointer"
+          style={{ background: 'var(--surface-2)', border: '1px solid var(--border-2)', color: '#888' }}>
           Cancel
         </button>
-        {error && <span className="text-xs text-red-400">{error}</span>}
+        {error && <span className="text-xs" style={{ color: 'var(--red)' }}>{error}</span>}
       </div>
     </form>
+  )
+}
+
+function OpenPositionCard({ trade, onClose, onDelete }: {
+  trade: Trade
+  onClose: () => void
+  onDelete: () => void
+}) {
+  const pnl = trade.unrealized_pnl
+  const pct = trade.unrealized_pnl_pct
+  const color = pnlColor(pnl)
+
+  return (
+    <div className="rounded-2xl border p-4" style={{ background: 'var(--surface-2)', borderColor: 'var(--border-2)' }}>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <span className="font-bold text-white text-base">{trade.symbol}</span>
+          <div className="text-xs mt-0.5" style={{ color: '#666' }}>
+            {trade.shares} shares · entered {trade.entry_date}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-lg font-bold font-mono" style={{ color }}>
+            {fmt(pnl)}
+          </div>
+          {pct != null && (
+            <div className="text-xs font-mono" style={{ color }}>
+              {pct >= 0 ? '+' : ''}{pct.toFixed(1)}%
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center gap-4 text-xs font-mono" style={{ color: '#666' }}>
+        <span>Entry <span className="text-white">${trade.entry_price.toFixed(2)}</span></span>
+        {trade.current_price != null && (
+          <span>Now <span className="text-white">${trade.current_price.toFixed(2)}</span></span>
+        )}
+        {trade.signal_reason && (
+          <span className="truncate max-w-[160px]" style={{ color: '#555' }}>{trade.signal_reason}</span>
+        )}
+      </div>
+
+      <div className="mt-3 flex gap-2">
+        <button onClick={onClose}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors"
+          style={{ background: 'var(--surface)', border: '1px solid var(--border-2)', color: '#ccc' }}>
+          Close position
+        </button>
+        <button onClick={onDelete}
+          className="px-2.5 py-1.5 rounded-lg text-xs cursor-pointer transition-colors"
+          style={{ color: '#555' }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'var(--red)')}
+          onMouseLeave={e => (e.currentTarget.style.color = '#555')}>
+          ×
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -196,7 +259,6 @@ export function TradeLog({ onTradesChange }: { onTradesChange?: (trades: Trade[]
 
   const open = trades.filter(t => t.exit_price == null)
   const closed = trades.filter(t => t.exit_price != null)
-
   const totalRealized = closed.reduce((s, t) => s + (t.realized_pnl ?? 0), 0)
   const wins = closed.filter(t => (t.realized_pnl ?? 0) > 0).length
   const winRate = closed.length ? Math.round((wins / closed.length) * 100) : null
@@ -208,129 +270,72 @@ export function TradeLog({ onTradesChange }: { onTradesChange?: (trades: Trade[]
   }
 
   return (
-    <div className="bg-[#1a1d2e] rounded-lg border border-slate-800">
+    <div className="rounded-2xl border overflow-hidden" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
       {/* Header */}
-      <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-4">
-          <h2 className="text-xs font-bold text-slate-300 tracking-widest uppercase">Trade Log</h2>
+      <div className="px-5 py-4 border-b flex items-center justify-between flex-wrap gap-3"
+        style={{ borderColor: 'var(--border)' }}>
+        <div className="flex items-center gap-5">
+          <h2 className="text-sm font-semibold" style={{ color: '#888' }}>Trade Log</h2>
           {closed.length > 0 && (
-            <div className="flex gap-3 text-xs text-slate-500">
-              <span>
-                Realized:{' '}
-                <span className={pnlColor(totalRealized)}>
-                  {fmt(totalRealized)}
-                </span>
-              </span>
+            <div className="flex gap-4 text-xs">
+              <span>Realized <span className="font-mono font-semibold" style={{ color: pnlColor(totalRealized) }}>{fmt(totalRealized)}</span></span>
               {winRate !== null && (
-                <span>Win rate: <span className="text-slate-300">{winRate}%</span> ({wins}/{closed.length})</span>
+                <span style={{ color: '#666' }}>Win rate <span className="text-white">{winRate}%</span> ({wins}/{closed.length})</span>
               )}
             </div>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-600 hidden md:block">
-            Execute BUY/SELL at next market open · Set stop immediately after entry
-          </span>
-          <button
-            onClick={() => { setShowAdd(v => !v); setClosingId(null) }}
-            className="text-xs bg-teal-800 hover:bg-teal-700 px-3 py-1.5 rounded border border-teal-700 text-teal-200 transition-colors cursor-pointer"
-          >
-            + Log Trade
-          </button>
-        </div>
+        <button
+          onClick={() => { setShowAdd(v => !v); setClosingId(null) }}
+          className="px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer transition-colors"
+          style={{ background: 'var(--green)', color: '#000' }}
+        >
+          + Log Trade
+        </button>
       </div>
 
-      <div className="p-4">
-        {/* Add form */}
+      <div className="p-5">
         {showAdd && (
           <AddForm onSave={async () => { setShowAdd(false); await load() }} onCancel={() => setShowAdd(false)} />
         )}
 
-        {loading && <div className="text-xs text-slate-500 py-4 text-center">Loading…</div>}
-
+        {loading && <div className="text-sm py-6 text-center" style={{ color: '#555' }}>Loading…</div>}
         {loadError && (
-          <div className="text-xs text-red-400 py-4 text-center">
-            {loadError} — <button onClick={() => void load()} className="underline cursor-pointer">retry</button>
+          <div className="text-sm py-6 text-center" style={{ color: 'var(--red)' }}>
+            {loadError} —{' '}
+            <button onClick={() => void load()} className="underline cursor-pointer">retry</button>
           </div>
         )}
-
         {!loading && !loadError && trades.length === 0 && (
-          <div className="text-xs text-slate-500 py-6 text-center">
-            No trades logged yet. Click <span className="text-teal-400">+ Log Trade</span> when you execute a signal.
+          <div className="text-sm py-8 text-center" style={{ color: '#555' }}>
+            No trades logged yet.{' '}
+            <span style={{ color: 'var(--teal)' }}>Click + Log Trade when you execute a signal.</span>
           </div>
         )}
 
-        {/* Open trades */}
+        {/* Open positions */}
         {open.length > 0 && (
           <div className="mb-6">
-            <div className="text-xs font-medium text-slate-500 uppercase tracking-widest mb-2">
+            <div className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: '#555' }}>
               Open Positions ({open.length})
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-slate-800 text-slate-600 uppercase tracking-wider">
-                    <th className="py-2 text-left font-medium">Symbol</th>
-                    <th className="py-2 text-right font-medium">Shares</th>
-                    <th className="py-2 text-right font-medium">Entry</th>
-                    <th className="py-2 text-right font-medium">Current</th>
-                    <th className="py-2 text-right font-medium">P&L</th>
-                    <th className="py-2 text-left font-medium pl-4">Signal</th>
-                    <th className="py-2 text-right font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {open.map(t => (
-                    <>
-                      <tr key={t.id} className="border-b border-slate-800/50 hover:bg-slate-900/20 transition-colors">
-                        <td className="py-2.5 font-bold text-slate-100">{t.symbol}</td>
-                        <td className="py-2.5 font-mono text-right text-slate-300">{t.shares}</td>
-                        <td className="py-2.5 font-mono text-right text-slate-400">
-                          <div>${t.entry_price.toFixed(2)}</div>
-                          <div className="text-slate-600">{t.entry_date}</div>
-                        </td>
-                        <td className="py-2.5 font-mono text-right text-slate-300">
-                          {t.current_price != null ? `$${t.current_price.toFixed(2)}` : '—'}
-                        </td>
-                        <td className={`py-2.5 font-mono text-right font-bold ${pnlColor(t.unrealized_pnl)}`}>
-                          {fmt(t.unrealized_pnl)}
-                          <div className="font-normal text-xs">{fmtPct(t.unrealized_pnl_pct)}</div>
-                        </td>
-                        <td className="py-2.5 pl-4 text-slate-500 max-w-[200px] truncate">
-                          {t.signal_reason ?? '—'}
-                        </td>
-                        <td className="py-2.5 text-right">
-                          <div className="flex gap-1 justify-end">
-                            <button
-                              onClick={() => setClosingId(closingId === t.id ? null : t.id)}
-                              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors cursor-pointer"
-                            >
-                              Close
-                            </button>
-                            <button
-                              onClick={() => void handleDelete(t.id)}
-                              className="px-2 py-1 rounded bg-slate-800 hover:bg-red-900/40 border border-slate-700 text-slate-500 hover:text-red-400 transition-colors cursor-pointer"
-                            >
-                              ×
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                      {closingId === t.id && (
-                        <tr key={`close-${t.id}`}>
-                          <td colSpan={7} className="pb-2 pt-0">
-                            <CloseForm
-                              trade={t}
-                              onSave={async () => { setClosingId(null); await load() }}
-                              onCancel={() => setClosingId(null)}
-                            />
-                          </td>
-                        </tr>
-                      )}
-                    </>
-                  ))}
-                </tbody>
-              </table>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {open.map(t => (
+                <div key={t.id}>
+                  <OpenPositionCard
+                    trade={t}
+                    onClose={() => setClosingId(closingId === t.id ? null : t.id)}
+                    onDelete={() => void handleDelete(t.id)}
+                  />
+                  {closingId === t.id && (
+                    <CloseForm
+                      trade={t}
+                      onSave={async () => { setClosingId(null); await load() }}
+                      onCancel={() => setClosingId(null)}
+                    />
+                  )}
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -338,54 +343,44 @@ export function TradeLog({ onTradesChange }: { onTradesChange?: (trades: Trade[]
         {/* Closed trades */}
         {closed.length > 0 && (
           <div>
-            <div className="text-xs font-medium text-slate-500 uppercase tracking-widest mb-2">
+            <div className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: '#555' }}>
               Closed Trades ({closed.length})
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-slate-800 text-slate-600 uppercase tracking-wider">
-                    <th className="py-2 text-left font-medium">Symbol</th>
-                    <th className="py-2 text-right font-medium">Shares</th>
-                    <th className="py-2 text-right font-medium">Entry</th>
-                    <th className="py-2 text-right font-medium">Exit</th>
-                    <th className="py-2 text-right font-medium">Realized P&L</th>
-                    <th className="py-2 text-left font-medium pl-4">Notes</th>
-                    <th className="py-2"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {closed.map(t => (
-                    <tr key={t.id} className="border-b border-slate-800/50 hover:bg-slate-900/20 transition-colors">
-                      <td className="py-2.5 font-bold text-slate-300">{t.symbol}</td>
-                      <td className="py-2.5 font-mono text-right text-slate-400">{t.shares}</td>
-                      <td className="py-2.5 font-mono text-right text-slate-500">
-                        <div>${t.entry_price.toFixed(2)}</div>
-                        <div className="text-slate-600">{t.entry_date}</div>
-                      </td>
-                      <td className="py-2.5 font-mono text-right text-slate-500">
-                        <div>${t.exit_price!.toFixed(2)}</div>
-                        <div className="text-slate-600">{t.exit_date}</div>
-                      </td>
-                      <td className={`py-2.5 font-mono text-right font-bold ${pnlColor(t.realized_pnl)}`}>
-                        {fmt(t.realized_pnl)}
-                        <div className="font-normal">{fmtPct(t.realized_pnl_pct)}</div>
-                      </td>
-                      <td className="py-2.5 pl-4 text-slate-500 max-w-[200px] truncate">
-                        {t.notes ?? t.signal_reason ?? '—'}
-                      </td>
-                      <td className="py-2.5 text-right">
-                        <button
-                          onClick={() => void handleDelete(t.id)}
-                          className="px-2 py-1 rounded bg-slate-800 hover:bg-red-900/40 border border-slate-700 text-slate-500 hover:text-red-400 transition-colors cursor-pointer"
-                        >
-                          ×
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="rounded-xl border overflow-hidden" style={{ borderColor: 'var(--border-2)' }}>
+              {closed.map((t, i) => (
+                <div
+                  key={t.id}
+                  className="flex items-center gap-4 px-4 py-3 border-b last:border-0 hover:bg-white/[0.02] transition-colors"
+                  style={{ borderColor: 'var(--border)' }}
+                >
+                  <span className="font-bold text-sm w-14 flex-shrink-0" style={{ color: i < 3 ? 'white' : '#888' }}>
+                    {t.symbol}
+                  </span>
+                  <span className="text-xs font-mono w-10 flex-shrink-0" style={{ color: '#666' }}>
+                    {t.shares}
+                  </span>
+                  <span className="text-xs font-mono flex-1" style={{ color: '#555' }}>
+                    ${t.entry_price.toFixed(2)} → ${t.exit_price!.toFixed(2)}
+                  </span>
+                  <span className="text-xs hidden sm:block" style={{ color: '#555' }}>
+                    {t.exit_date}
+                  </span>
+                  <span className="text-sm font-mono font-semibold w-20 text-right" style={{ color: pnlColor(t.realized_pnl) }}>
+                    {fmt(t.realized_pnl)}
+                    {t.realized_pnl_pct != null && (
+                      <span className="text-[10px] block font-normal">{fmtPct(t.realized_pnl_pct)}</span>
+                    )}
+                  </span>
+                  <button
+                    onClick={() => void handleDelete(t.id)}
+                    className="text-xs px-2 py-1 rounded cursor-pointer transition-colors"
+                    style={{ color: '#444' }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'var(--red)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = '#444')}>
+                    ×
+                  </button>
+                </div>
+              ))}
             </div>
           </div>
         )}

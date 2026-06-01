@@ -39,46 +39,49 @@ export function WeeklyChecklist() {
 
   const done = checked.size
   const total = ITEMS.length
+  const pct = (done / total) * 100
 
   return (
-    <div className="bg-[#1a1d2e] rounded-lg border border-slate-800">
-      <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-        <h2 className="text-xs font-bold text-slate-300 tracking-widest uppercase">Weekly Checklist</h2>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-500">{done}/{total}</span>
-          <div className="w-16 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+    <div className="rounded-2xl border overflow-hidden" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+      <div className="px-5 py-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border)' }}>
+        <h2 className="text-sm font-semibold" style={{ color: '#888' }}>Weekly Checklist</h2>
+        <div className="flex items-center gap-3">
+          <span className="text-xs" style={{ color: '#555' }}>{done}/{total}</span>
+          <div className="w-20 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-2)' }}>
             <div
-              className="h-full bg-teal-500 rounded-full motion-safe:transition-all motion-safe:duration-300"
-              style={{ width: `${(done / total) * 100}%` }}
+              className="h-full rounded-full motion-safe:transition-all motion-safe:duration-300"
+              style={{ width: `${pct}%`, background: 'var(--green)' }}
             />
           </div>
         </div>
       </div>
 
-      <div className="divide-y divide-slate-800/50">
+      <div>
         {ITEMS.map(item => {
           const isChecked = checked.has(item.id)
           return (
             <button
               key={item.id}
               onClick={() => toggle(item.id)}
-              className="w-full px-4 py-3 flex items-start gap-3 text-left hover:bg-slate-800/30 transition-colors cursor-pointer group"
+              className="w-full px-5 py-3.5 flex items-start gap-3 text-left border-b last:border-0 transition-colors cursor-pointer hover:bg-white/[0.02]"
+              style={{ borderColor: 'var(--border)' }}
             >
-              <div className={`mt-0.5 w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center transition-colors ${
-                isChecked
-                  ? 'bg-teal-500 border-teal-500'
-                  : 'border-slate-600 group-hover:border-slate-500'
-              }`}>
+              <div className={`mt-0.5 w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center transition-colors`}
+                style={isChecked
+                  ? { background: 'var(--green)', borderColor: 'var(--green)' }
+                  : { borderColor: '#444' }
+                }>
                 {isChecked && (
-                  <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 10 10" fill="none">
-                    <path d="M1.5 5l3 3 4-6" stroke="currentColor" strokeWidth="1.5"
+                  <svg className="w-2.5 h-2.5" viewBox="0 0 10 10" fill="none">
+                    <path d="M1.5 5l3 3 4-6" stroke="#000" strokeWidth="1.5"
                       strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                 )}
               </div>
-              <span className={`text-xs leading-relaxed ${
-                isChecked ? 'text-slate-600 line-through' : 'text-slate-300'
-              }`}>
+              <span className="text-sm leading-relaxed" style={{
+                color: isChecked ? '#555' : '#ccc',
+                textDecoration: isChecked ? 'line-through' : 'none',
+              }}>
                 {item.text}
               </span>
             </button>
@@ -87,12 +90,12 @@ export function WeeklyChecklist() {
       </div>
 
       {done === total && (
-        <div className="px-4 py-2.5 border-t border-slate-800 text-xs text-teal-400 text-center">
+        <div className="px-5 py-3 text-xs text-center font-medium" style={{ color: 'var(--green)' }}>
           Weekly review complete
         </div>
       )}
 
-      <div className="px-4 py-2 border-t border-slate-800 text-xs text-slate-700">
+      <div className="px-5 py-2.5 border-t text-xs" style={{ borderColor: 'var(--border)', color: '#444' }}>
         Resets every Monday · execute signals at 9:30 AM ET
       </div>
     </div>
