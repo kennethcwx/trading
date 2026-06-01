@@ -86,7 +86,7 @@ function SignalRow({ item }: { item: SignalItem }) {
   return (
     <div
       className="flex flex-wrap items-center gap-4 px-5 py-4 border-b last:border-0 transition-colors hover:bg-white/[0.02]"
-      style={{ borderColor: 'var(--border)' }}
+      style={{ borderColor: 'var(--border)', opacity: signal.action === 'SKIP' ? 0.4 : 1 }}
     >
       {/* Left: ticker + badge */}
       <div className="flex items-center gap-3 w-36 flex-shrink-0">
@@ -175,6 +175,7 @@ export function SignalsTable({ signals }: { signals: SignalsResponse }) {
     ...signals.signals.filter(s => ACTIONABLE.includes(s.signal.action)),
     ...signals.signals.filter(s => s.signal.action === 'WATCH'),
     ...signals.signals.filter(s => s.signal.action === 'HOLD'),
+    ...signals.signals.filter(s => s.signal.action === 'SKIP'),
   ]
 
   const filtered = filter === 'all'        ? sorted
@@ -201,7 +202,7 @@ export function SignalsTable({ signals }: { signals: SignalsResponse }) {
             const count = t.id === 'actionable' ? actionableCount
               : t.id === 'watching' ? (counts['WATCH'] ?? 0)
               : t.id === 'hold' ? (counts['HOLD'] ?? 0)
-              : signals.signals.filter(s => s.signal.action !== 'SKIP').length
+              : signals.signals.length
             return (
               <button
                 key={t.id}
