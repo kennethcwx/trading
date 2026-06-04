@@ -13,7 +13,8 @@ async function get<T>(path: string): Promise<T> {
 }
 
 export const fetchMarketRegime = () => get<MarketRegime>('/market-regime')
-export const fetchSignals = () => get<SignalsResponse>('/signals')
+export type SignalGroup = 'core' | 'quantum' | 'covered_calls'
+export const fetchSignals = (group: SignalGroup = 'core') => get<SignalsResponse>(`/signals?group=${group}`)
 export const fetchPortfolio = () => get<PortfolioResponse>('/portfolio')
 export const fetchOptions = () => get<OptionsResponse>('/options-opportunities')
 

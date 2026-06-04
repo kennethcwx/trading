@@ -1,7 +1,14 @@
 PORTFOLIO_SIZE_SGD = 5000
 PORTFOLIO_CURRENCY = "SGD"
 
-WATCHLIST = ["AAPL", "MSFT", "NVDA", "BAC"]
+# Core watchlist — swing trades, technical signals apply
+WATCHLIST = ["AAPL", "MSFT", "NVDA", "BAC", "AMD", "CAT", "ABBV", "AMZN"]
+
+# Quantum computing — long-term positions, trend-driven (IONQ + QBTS priority)
+QUANTUM_WATCHLIST = ["IONQ", "QBTS", "RGTI", "IBM"]
+
+# Covered calls — liquid options, elevated IV, momentum-only entries (MU + ARM priority)
+COVERED_CALLS_WATCHLIST = ["MU", "ARM", "SOFI", "F", "COIN"]
 
 # Risk rules
 RISK_PER_TRADE_PCT = 0.01    # 1% portfolio risk per trade

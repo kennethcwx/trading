@@ -18,7 +18,7 @@ import db
 import telegram_bot
 from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD
+from config import PORTFOLIO_SIZE_SGD, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST
 
 logging.basicConfig(level=logging.INFO)
 
@@ -545,7 +545,7 @@ async def portfolio():
 
 
 @app.get("/api/signals")
-async def signals():
+async def signals(group: str = "core"):
     loop = asyncio.get_event_loop()
     regime = await loop.run_in_executor(None, get_market_regime)
     sgd_to_usd = regime.get("sgd_to_usd", 0.74)
@@ -554,7 +554,14 @@ async def signals():
     positions = await loop.run_in_executor(None, ibkr.get_portfolio)
     position_map = {p["symbol"]: p for p in positions if p["asset_type"] == "STK"}
 
-    all_symbols = list(dict.fromkeys(db.get_watchlist() + list(position_map.keys())))
+    if group == "quantum":
+        base_symbols = QUANTUM_WATCHLIST
+    elif group == "covered_calls":
+        base_symbols = COVERED_CALLS_WATCHLIST
+    else:
+        base_symbols = db.get_watchlist()
+
+    all_symbols = list(dict.fromkeys(base_symbols + list(position_map.keys())))
 
     results = []
     for symbol in all_symbols:

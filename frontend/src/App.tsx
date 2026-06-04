@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { fetchMarketRegime, fetchSignals, fetchPortfolio, fetchOptions, postRefreshCache } from './api'
+import type { SignalGroup } from './api'
 import { MarketBanner } from './components/MarketBanner'
 import { ActionSummary } from './components/ActionSummary'
 import { SignalsTable } from './components/SignalsTable'
@@ -180,13 +181,35 @@ function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('dashboard')
+  const [signalGroup, setSignalGroup] = useState<SignalGroup>('core')
   const [regime, setRegime] = useState<MarketRegime | null>(null)
-  const [signals, setSignals] = useState<SignalsResponse | null>(null)
+  const [signalsByGroup, setSignalsByGroup] = useState<Partial<Record<SignalGroup, SignalsResponse>>>({})
   const [options, setOptions] = useState<OptionsResponse | null>(null)
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
+  const [groupLoading, setGroupLoading] = useState(false)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  const signals = signalsByGroup[signalGroup] ?? null
+
+  const fetchGroup = useCallback(async (group: SignalGroup) => {
+    if (signalsByGroup[group]) return
+    setGroupLoading(true)
+    try {
+      const s = await fetchSignals(group)
+      setSignalsByGroup(prev => ({ ...prev, [group]: 'error' in s ? undefined : s }))
+    } catch {
+      // silently fail — error bar already shown from main refresh
+    } finally {
+      setGroupLoading(false)
+    }
+  }, [signalsByGroup])
+
+  const handleGroupChange = useCallback((group: SignalGroup) => {
+    setSignalGroup(group)
+    void fetchGroup(group)
+  }, [fetchGroup])
 
   const refresh = useCallback(async (clearCache = false) => {
     setLoading(true)
@@ -195,12 +218,13 @@ export default function App() {
       if (clearCache) await postRefreshCache()
       const [r, s, o, t] = await Promise.all([
         fetchMarketRegime(),
-        fetchSignals(),
+        fetchSignals('core'),
         fetchOptions(),
         fetchTrades(),
       ])
       setRegime('error' in r ? null : r)
-      setSignals('error' in s ? null : s)
+      setSignalsByGroup({ core: 'error' in s ? undefined : s })
+      setSignalGroup('core')
       setOptions(o)
       setTrades(t.trades)
       setLastRefresh(new Date())
@@ -252,14 +276,38 @@ export default function App() {
           {tab === 'signals' && (
             <>
               {regime && <MarketBanner regime={regime} />}
-              {signals
-                ? <SignalsTable signals={signals} />
-                : !loading && (
-                  <div className="rounded-2xl border p-8 text-sm text-center"
-                    style={{ background: 'var(--surface)', borderColor: 'var(--border)', color: '#555' }}>
-                    No signal data available
-                  </div>
-                )
+
+              {/* List group selector */}
+              <div className="flex gap-1 p-1 rounded-xl w-fit" style={{ background: 'var(--surface)' }}>
+                {([
+                  { id: 'core' as SignalGroup,          label: 'Core' },
+                  { id: 'quantum' as SignalGroup,        label: 'Quantum' },
+                  { id: 'covered_calls' as SignalGroup,  label: 'Covered Calls' },
+                ] as { id: SignalGroup; label: string }[]).map(g => (
+                  <button
+                    key={g.id}
+                    onClick={() => handleGroupChange(g.id)}
+                    className="px-4 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer"
+                    style={signalGroup === g.id
+                      ? { background: 'var(--surface-2)', color: 'white' }
+                      : { color: '#666' }
+                    }
+                  >
+                    {g.label}
+                  </button>
+                ))}
+              </div>
+
+              {(loading || groupLoading)
+                ? null
+                : signals
+                  ? <SignalsTable signals={signals} group={signalGroup} />
+                  : (
+                    <div className="rounded-2xl border p-8 text-sm text-center"
+                      style={{ background: 'var(--surface)', borderColor: 'var(--border)', color: '#555' }}>
+                      No signal data available
+                    </div>
+                  )
               }
               <WatchlistEditor onSave={() => void refresh()} />
             </>

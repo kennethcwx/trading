@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { SignalsResponse, SignalItem, SignalAction, Fundamentals, RelativeStrength } from '../types'
+import type { SignalGroup } from '../api'
 
 const BADGE: Record<SignalAction, { color: string; bg: string; border: string }> = {
   BUY:       { color: 'var(--green)',  bg: 'var(--green-dim)',  border: 'rgba(0,200,5,0.25)' },
@@ -168,8 +169,15 @@ const FILTER_TABS: { id: FilterTab; label: string }[] = [
 
 const ACTIONABLE: SignalAction[] = ['BUY', 'SELL', 'SELL_HALF', 'REVIEW']
 
-export function SignalsTable({ signals }: { signals: SignalsResponse }) {
+const GROUP_META: Record<SignalGroup, { label: string; desc: string }> = {
+  core:          { label: 'Core',          desc: 'Swing trades · RSI + Donchian signals' },
+  quantum:       { label: 'Quantum',       desc: 'Long-term trend positions · IONQ & QBTS priority' },
+  covered_calls: { label: 'Covered Calls', desc: 'High-IV stocks · momentum entries only · MU & ARM priority' },
+}
+
+export function SignalsTable({ signals, group = 'core' }: { signals: SignalsResponse; group?: SignalGroup }) {
   const [filter, setFilter] = useState<FilterTab>('all')
+  const meta = GROUP_META[group]
 
   const sorted = [
     ...signals.signals.filter(s => ACTIONABLE.includes(s.signal.action)),
@@ -194,7 +202,10 @@ export function SignalsTable({ signals }: { signals: SignalsResponse }) {
       {/* Header */}
       <div className="px-5 py-4 border-b flex flex-wrap items-center justify-between gap-3"
         style={{ borderColor: 'var(--border)' }}>
-        <h2 className="text-sm font-semibold" style={{ color: '#888' }}>Signals</h2>
+        <div>
+          <h2 className="text-sm font-semibold text-white">{meta.label}</h2>
+          <p className="text-[11px] mt-0.5" style={{ color: '#555' }}>{meta.desc}</p>
+        </div>
 
         {/* Filter tabs */}
         <div className="flex gap-1 p-1 rounded-xl" style={{ background: 'var(--surface-2)' }}>
