@@ -48,7 +48,7 @@ function plainAction(item: SignalItem): string {
 function RsiProgress({ rsi, suggestedAction }: { rsi: number | null; suggestedAction: string }) {
   if (rsi === null) return null
   const trigger = 40
-  const ptsAway = Math.max(0, rsi - trigger)
+  const ptsAway = Math.max(0, Math.round(rsi - trigger))
   const pct = Math.min(100, Math.max(0, ((70 - rsi) / (70 - trigger)) * 100))
   const color = rsi < 45 ? 'var(--green)' : rsi < 50 ? 'var(--yellow)' : 'var(--orange)'
 
