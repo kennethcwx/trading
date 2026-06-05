@@ -288,23 +288,38 @@ async def handle_telegram_command(text: str):
             return
         symbol = parts[1].upper()
         telegram_bot.send(f"⏳ Fetching signal for {symbol}…")
-        regime = await loop.run_in_executor(None, get_market_regime)
-        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
-        if not analysis:
-            telegram_bot.send(f"❌ Could not fetch data for {symbol} — check the ticker")
-            return
-        fundamentals = await loop.run_in_executor(None, get_fundamentals, symbol)
-        rel_strength = await loop.run_in_executor(None, get_relative_strength, symbol)
-        signal = generate_signal(analysis, None, regime, fundamentals, rel_strength)
-        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
-        size_mult = regime.get("new_position_size_multiplier", 1.0)
-        pos_size = None
-        if signal["action"] == "BUY":
-            pos_size = calculate_position_size(
-                PORTFOLIO_SIZE_SGD, analysis["price"], analysis["stop_loss"], sgd_to_usd, size_mult,
+        try:
+            regime = await loop.run_in_executor(None, get_market_regime)
+            analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+            if not analysis:
+                telegram_bot.send(f"❌ Could not fetch data for {symbol} — check the ticker")
+                return
+            fundamentals, rel_strength, sector_status = await asyncio.gather(
+                loop.run_in_executor(None, get_fundamentals, symbol),
+                loop.run_in_executor(None, get_relative_strength, symbol),
+                loop.run_in_executor(None, get_sector_etf_status, symbol),
             )
-        msg = telegram_bot.format_signal(symbol, signal, analysis, pos_size, fundamentals)
-        telegram_bot.send(msg)
+            # Single-symbol lookup — no peer group to rank against, skip RS rank filter
+            sector_ok = sector_status.get("above_200sma") if sector_status else None
+            signal = generate_signal(analysis, None, regime, fundamentals, rel_strength,
+                                     sector_ok=sector_ok)
+            sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+            size_mult = regime.get("new_position_size_multiplier", 1.0)
+            pos_size = None
+            if signal["action"] == "BUY":
+                pos_size = calculate_position_size(
+                    PORTFOLIO_SIZE_SGD, analysis["price"], analysis["stop_loss"], sgd_to_usd, size_mult,
+                )
+            msg = telegram_bot.format_signal(symbol, signal, analysis, pos_size, fundamentals)
+            # Append sector ETF context
+            if sector_status:
+                etf = sector_status["etf_symbol"]
+                trend = "▲ above" if sector_status["above_200sma"] else "▼ BELOW"
+                msg += f"\n\n<code>Sector ETF  {etf} {trend} 200 SMA</code>"
+            telegram_bot.send(msg)
+        except Exception as e:
+            logging.warning(f"/signal error: {e}")
+            telegram_bot.send(f"❌ Signal fetch failed: {e}")
 
     elif cmd == "/pnl":
         rows = db.fetch("SELECT * FROM trades ORDER BY entry_date DESC")
