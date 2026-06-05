@@ -167,13 +167,9 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         else:
             proximity = "Early watch — not close yet"
 
-        momentum_note = (
-            f" · or price breaks ${high_20d:.2f} (20d high) on volume"
-            if high_20d and price < high_20d else ""
-        )
         return _signal(
             "WATCH", "LOW",
-            [f"RSI {rsi:.0f} — {pts_away} pts from trigger{momentum_note}"],
+            [f"RSI {rsi:.0f} — {pts_away} pts from trigger"],
             f"{proximity} · At current price: Stop ${stop:.2f} · Target ${target:.2f}",
         )
 
