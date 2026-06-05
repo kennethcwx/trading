@@ -37,7 +37,7 @@ function plainReason(item: SignalItem): string {
 function plainAction(item: SignalItem): string {
   const { signal, analysis, position_size } = item
   if (signal.action === 'BUY' && position_size) {
-    return `Buy ${position_size.shares.toFixed(2)} shares at ~$${analysis.price.toFixed(2)} · Stop $${analysis.stop_loss.toFixed(2)} · Target $${analysis.profit_target.toFixed(2)}`
+    return `Buy ${position_size.shares.toFixed(3)} shares at ~$${analysis.price.toFixed(2)} · Stop $${analysis.stop_loss.toFixed(2)} · Target $${analysis.profit_target.toFixed(2)}`
   }
   if (signal.action === 'SELL_HALF') return 'Sell half at market open · Move stop to breakeven on the rest'
   if (signal.action === 'SELL') return 'Close the full position at market open'

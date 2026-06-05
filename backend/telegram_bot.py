@@ -307,7 +307,7 @@ def format_scan_results(results: dict) -> str:
             reason = b["signal"]["reasons"][0]
             rs_str = f"  RS {b['rs_rank']}th" if b.get("rs_rank") is not None else ""
             size_str = (
-                f"\n  <code>Size  {ps['shares']:.2f} sh  S${ps['position_value_sgd']:.0f}</code>"
+                f"\n  <code>Size  {ps['shares']:.3f} sh  S${ps['position_value_sgd']:.0f}</code>"
                 if ps else ""
             )
             lines.append(
