@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { fetchMarketRegime, fetchSignals, fetchPortfolio, fetchOptions, postRefreshCache } from './api'
+import { fetchMarketRegime, fetchSignals, fetchPortfolio, fetchOptions, postRefreshCache, fetchTrades } from './api'
 import type { SignalGroup } from './api'
 import { MarketBanner } from './components/MarketBanner'
 import { ActionSummary } from './components/ActionSummary'
@@ -9,8 +9,8 @@ import { WeeklyChecklist } from './components/WeeklyChecklist'
 import { WatchlistEditor } from './components/WatchlistEditor'
 import { TradeLog } from './components/TradeLog'
 import { PnLChart } from './components/PnLChart'
-import type { MarketRegime, SignalsResponse, OptionsResponse, Trade } from './types'
-import { fetchTrades } from './api'
+import { PortfolioSummary } from './components/PortfolioSummary'
+import type { MarketRegime, SignalsResponse, OptionsResponse, PortfolioResponse, Trade } from './types'
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000
 
@@ -185,6 +185,7 @@ export default function App() {
   const [regime, setRegime] = useState<MarketRegime | null>(null)
   const [signalsByGroup, setSignalsByGroup] = useState<Partial<Record<SignalGroup, SignalsResponse>>>({})
   const [options, setOptions] = useState<OptionsResponse | null>(null)
+  const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null)
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
   const [groupLoading, setGroupLoading] = useState(false)
@@ -228,6 +229,13 @@ export default function App() {
       setOptions(o)
       setTrades(t.trades)
       setLastRefresh(new Date())
+      // Portfolio fetch is best-effort — IBKR offline is the normal state
+      try {
+        const p = await fetchPortfolio()
+        setPortfolio(p)
+      } catch {
+        setPortfolio({ positions: [], account: { cash: null, total_value: null, currency: 'USD', connected: false }, ibkr_connected: false })
+      }
     } catch {
       setError('Cannot reach backend. Make sure the Python server is running.')
     } finally {
@@ -263,6 +271,7 @@ export default function App() {
           {tab === 'dashboard' && (
             <>
               {regime && <MarketBanner regime={regime} />}
+              {portfolio && <PortfolioSummary portfolio={portfolio} onReconnect={() => void refresh()} />}
               {signals && <ActionSummary signals={signals} />}
               <PnLChart trades={trades} />
 

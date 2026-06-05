@@ -6,7 +6,7 @@ const ITEMS = [
   { id: 'stops',    text: 'Check open positions — still above their stop prices?' },
   { id: 'earnings', text: 'Any earnings in the next 7 days? Decide to hold or exit beforehand.' },
   { id: 'trailing', text: 'Any position up 15%+? Move stop up to lock in gains.' },
-  { id: 'ivr',      text: 'Check Market Chameleon: IVR > 30 on any watchlist stock? Covered call opportunity.' },
+  { id: 'ivr',      text: 'Wheel Strategy panel: any SELL PUT or SELL CALL signals? Confirm IVR > 30 on Market Chameleon before entering.' },
   { id: 'journal',  text: 'Log any trades executed this week in the Trade Log.' },
 ]
 

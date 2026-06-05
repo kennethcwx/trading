@@ -355,6 +355,7 @@ def set_bot_commands() -> bool:
     if not TOKEN:
         return False
     commands = [
+        {"command": "briefing",    "description": "Send today's morning briefing now"},
         {"command": "signal",      "description": "Signal for any ticker — /signal AAPL"},
         {"command": "share",       "description": "Shareable summary for friends — /share AAPL"},
         {"command": "positions",   "description": "Open trades with live P&L"},

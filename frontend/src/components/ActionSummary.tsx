@@ -1,4 +1,4 @@
-import type { SignalsResponse, SignalItem, SignalAction } from '../types'
+import type { SignalsResponse, SignalItem, SignalAction, TickerAnalysis } from '../types'
 
 const BADGE: Record<SignalAction, { color: string; bg: string; border: string }> = {
   BUY:       { color: 'var(--green)',  bg: 'var(--green-dim)',  border: 'rgba(0,200,5,0.3)' },
@@ -43,6 +43,52 @@ function plainAction(item: SignalItem): string {
   if (signal.action === 'SELL') return 'Close the full position at market open'
   if (signal.action === 'REVIEW') return 'Decide before earnings: hold, exit, or trim'
   return signal.suggested_action
+}
+
+function RsiProgress({ rsi, analysis }: { rsi: number | null; analysis: TickerAnalysis }) {
+  if (rsi === null) return null
+  // Show progress from current RSI down to 40 (trigger)
+  const trigger = 40
+  const pct = Math.min(100, Math.max(0, ((70 - rsi) / (70 - trigger)) * 100))
+  const color = rsi < 45 ? 'var(--green)' : rsi < 50 ? 'var(--yellow)' : 'var(--orange)'
+  return (
+    <div className="mt-3 space-y-1.5">
+      <div className="flex items-center justify-between text-xs" style={{ color: '#666' }}>
+        <span>RSI progress to trigger</span>
+        <span className="font-mono" style={{ color }}>{rsi.toFixed(0)} / need &lt;40</span>
+      </div>
+      <div className="w-full h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-2)' }}>
+        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+      </div>
+      <div className="flex gap-4 text-xs font-mono" style={{ color: '#666' }}>
+        <span>Stop <span className="text-white">${analysis.stop_loss.toFixed(2)}</span></span>
+        <span>Target <span className="text-white">${analysis.profit_target.toFixed(2)}</span></span>
+        {analysis.high_20d > analysis.price && (
+          <span style={{ color: '#555' }}>Breakout at <span style={{ color: '#999' }}>${analysis.high_20d.toFixed(2)}</span></span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function WatchCard({ item }: { item: SignalItem }) {
+  const { symbol, analysis, signal } = item
+  return (
+    <div
+      className="rounded-2xl border p-4"
+      style={{ background: 'var(--yellow-dim)', borderColor: 'rgba(255,214,10,0.15)' }}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <span className="text-lg font-bold text-white">{symbol}</span>
+        <span className="text-[11px] font-bold px-2.5 py-1 rounded-full flex-shrink-0"
+          style={{ color: 'var(--yellow)', background: 'rgba(255,214,10,0.12)', border: '1px solid rgba(255,214,10,0.25)' }}>
+          WATCH
+        </span>
+      </div>
+      <p className="text-sm mt-2" style={{ color: '#bbb' }}>{signal.reasons[0]}</p>
+      <RsiProgress rsi={analysis.rsi} analysis={analysis} />
+    </div>
+  )
 }
 
 function ActionCard({ item }: { item: SignalItem }) {
@@ -92,7 +138,7 @@ export function ActionSummary({ signals }: { signals: SignalsResponse }) {
     <div>
       <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 gap-1">
         <h2 className="text-sm font-semibold" style={{ color: '#888' }}>This Week's Action Plan</h2>
-        <span className="text-xs" style={{ color: '#555' }}>Execute at market open · Mon 9:30 AM ET</span>
+        <span className="text-xs" style={{ color: '#555' }}>Execute at next market open · 9:30 AM ET</span>
       </div>
 
       {active.length === 0 ? (
@@ -109,12 +155,20 @@ export function ActionSummary({ signals }: { signals: SignalsResponse }) {
         </div>
       )}
 
-      {(holds > 0 || skips > 0 || watches.length > 0) && (
+      {watches.length > 0 && (
+        <div className="mt-4">
+          <div className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: '#555' }}>
+            Watching — not triggered yet
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {watches.map(item => <WatchCard key={item.symbol} item={item} />)}
+          </div>
+        </div>
+      )}
+
+      {(holds > 0 || skips > 0) && (
         <div className="mt-3 flex flex-wrap gap-3 text-xs" style={{ color: '#555' }}>
           {holds > 0 && <span>{holds} position{holds > 1 ? 's' : ''} — hold, no action</span>}
-          {watches.length > 0 && (
-            <span style={{ color: 'var(--yellow)' }}>Watching: {watches.map(w => w.symbol).join(', ')}</span>
-          )}
           {skips > 0 && <span>{skips} skipped — conditions not met</span>}
         </div>
       )}

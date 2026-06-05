@@ -172,7 +172,7 @@ const ACTIONABLE: SignalAction[] = ['BUY', 'SELL', 'SELL_HALF', 'REVIEW']
 const GROUP_META: Record<SignalGroup, { label: string; desc: string }> = {
   core:          { label: 'Core',          desc: 'Swing trades · RSI + Donchian signals' },
   quantum:       { label: 'Quantum',       desc: 'Long-term trend positions · IONQ & QBTS priority' },
-  covered_calls: { label: 'Covered Calls', desc: 'High-IV stocks · momentum entries only · MU & ARM priority' },
+  covered_calls: { label: 'Covered Calls', desc: 'High-IV stocks · momentum entries only · once in position, see Wheel Strategy panel for call timing' },
 }
 
 export function SignalsTable({ signals, group = 'core' }: { signals: SignalsResponse; group?: SignalGroup }) {

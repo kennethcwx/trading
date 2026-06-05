@@ -141,17 +141,24 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         return _signal("BUY", priority, tech_reasons + rs_note, action_text)
 
     if above_200 and rsi is not None and rsi < 55:
-        return _signal("WATCH", "LOW",
-                       [f"Approaching entry zone — RSI {rsi:.0f}, needs <{RSI_ENTRY} to trigger"],
-                       "Monitor daily")
+        pts_away = round(rsi - RSI_ENTRY)
+        momentum_note = (
+            f" · or price breaks ${high_20d:.2f} (20d high) on volume"
+            if high_20d and price < high_20d else ""
+        )
+        return _signal(
+            "WATCH", "LOW",
+            [f"RSI {rsi:.0f} — needs to drop {pts_away} more pts to trigger (target <{RSI_ENTRY}){momentum_note}"],
+            f"Entry setup when triggered: Stop ${stop:.2f} · Target ${target:.2f} · Risk:Reward 2:1",
+        )
 
     reasons = []
     if rsi and rsi > RSI_EXIT:
-        reasons.append(f"Overbought — RSI {rsi:.0f}, wait for pullback")
+        reasons.append(f"Overbought — RSI {rsi:.0f}, wait for pullback to <{RSI_ENTRY}")
     elif not above_200:
         reasons.append("Below 200 SMA — not in uptrend")
     else:
-        reasons.append("No entry signal this week")
+        reasons.append("No entry signal")
 
     return _signal("SKIP", "LOW", reasons, "No action")
 

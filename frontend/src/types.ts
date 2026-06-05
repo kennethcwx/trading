@@ -118,18 +118,26 @@ export interface PortfolioResponse {
   ibkr_connected: boolean
 }
 
+export interface OptionsSignal {
+  action: 'SELL PUT' | 'SELL CALL' | 'WATCH' | 'AVOID'
+  priority: 'HIGH' | 'MEDIUM' | 'LOW'
+  reason: string
+  suggested_action: string
+}
+
 export interface OptionsOpportunity {
   symbol: string
+  phase: 1 | 2
   strategy: string
   price: number
   suggested_strike: number
   dte_target: string
-  collateral_usd: number
   collateral_sgd: number
-  feasible: boolean
-  note: string
+  avg_cost: number | null
+  options_signal: OptionsSignal
   rsi: number | null
   days_to_earnings: number | null
+  above_200sma: boolean | null
 }
 
 export interface OptionsResponse {

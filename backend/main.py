@@ -147,6 +147,7 @@ async def handle_telegram_command(text: str):
             "/signal AAPL — current signal for any ticker\n"
             "/share AAPL — shareable summary to send to friends\n"
             "/positions — your open trades with live P&L\n"
+            "/briefing — send today's morning briefing now\n"
             "/alert AAPL 200 — notify when price crosses a level\n"
             "/alerts — list active price alerts\n"
             "/removealert 1 — remove alert by ID\n"
@@ -155,6 +156,10 @@ async def handle_telegram_command(text: str):
             "/remove AAPL — remove ticker from watchlist\n"
             "/status — market regime overview"
         )
+
+    elif cmd == "/briefing":
+        telegram_bot.send("⏳ Generating briefing…")
+        await send_morning_briefing()
 
     elif cmd == "/status":
         regime = await loop.run_in_executor(None, get_market_regime)
@@ -425,16 +430,29 @@ async def send_morning_briefing():
 
 
 async def morning_briefing_task():
+    # Catch-up: if the backend starts after 8:30 AM on a weekday and before
+    # market close (4 PM ET), the briefing was missed — send it now.
+    try:
+        now_et = datetime.now(ET)
+        cutoff = now_et.replace(hour=8, minute=30, second=0, microsecond=0)
+        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        if now_et.weekday() < 5 and cutoff <= now_et < market_close:
+            logging.info("Morning briefing: sending catch-up (backend started after 8:30 AM ET)")
+            await send_morning_briefing()
+    except Exception as e:
+        logging.warning(f"Morning briefing catch-up error: {e}")
+
     while True:
         try:
             now_et = datetime.now(ET)
             target = now_et.replace(hour=8, minute=30, second=0, microsecond=0)
             if now_et >= target:
                 target += timedelta(days=1)
+            # Skip straight to Monday if target lands on a weekend
+            while target.weekday() >= 5:
+                target += timedelta(days=1)
             await asyncio.sleep((target - now_et).total_seconds())
-            now_et = datetime.now(ET)
-            if now_et.weekday() < 5:  # Mon–Fri only
-                await send_morning_briefing()
+            await send_morning_briefing()
         except Exception as e:
             logging.warning(f"Morning briefing error: {e}")
             await asyncio.sleep(60)
@@ -575,6 +593,9 @@ async def signals(group: str = "core"):
         position = position_map.get(symbol)
         signal = generate_signal(analysis, position, regime, fundamentals, rel_strength)
 
+        if group == "covered_calls":
+            signal = _adapt_for_covered_calls(signal)
+
         pos_size = None
         if signal["action"] == "BUY":
             pos_size = calculate_position_size(
@@ -608,45 +629,220 @@ async def signals(group: str = "core"):
     }
 
 
+def _adapt_for_covered_calls(signal: dict) -> dict:
+    """Post-process a standard signal for the covered-calls group.
+    CC strategy wants momentum entries only (not mean-reversion), and HOLD/SELL
+    messages need to account for an open covered call position.
+    """
+    action = signal["action"]
+    reasons = signal.get("reasons", [])
+
+    if action == "BUY":
+        if any("Mean-reversion" in r for r in reasons):
+            return {
+                "action": "WATCH",
+                "priority": "LOW",
+                "reasons": ["Stock pulling back — mean-reversion entry not suited for CC setup"],
+                "suggested_action": "Wait for breakout to 20-day high + volume surge, then buy 100 shares",
+            }
+        # Momentum entry — adapt the suggested action for CC context
+        return {
+            **signal,
+            "suggested_action": "Buy 100 shares · sell covered call once RSI reaches 45–60 (see Wheel Strategy panel)",
+        }
+
+    if action == "HOLD":
+        return {
+            **signal,
+            "suggested_action": "Hold shares · check Wheel Strategy panel for covered call entry timing",
+        }
+
+    if action in ("SELL", "SELL_HALF"):
+        base = signal["suggested_action"]
+        return {
+            **signal,
+            "suggested_action": f"Buy back any open covered call first, then {base[0].lower() + base[1:]}",
+        }
+
+    return signal
+
+
+def _covered_call_signal(analysis: dict, regime: dict, avg_cost: float | None) -> dict:
+    rsi = analysis.get("rsi")
+    price = analysis.get("price", 0)
+    days_to_earnings = analysis.get("days_to_earnings")
+    vix_status = regime.get("vix_status", "NORMAL")
+
+    if days_to_earnings is not None and days_to_earnings < 30:
+        return {
+            "action": "AVOID", "priority": "HIGH",
+            "reason": f"Earnings in {days_to_earnings}d — skip this cycle (IV crush risk after report)",
+            "suggested_action": "Wait until after earnings, then sell covered call",
+        }
+
+    if rsi is not None and rsi < 40:
+        return {
+            "action": "WATCH", "priority": "LOW",
+            "reason": f"RSI {rsi:.0f} — stock still falling, don't cap the upside yet",
+            "suggested_action": "Wait for RSI > 40 to stabilise before selling call",
+        }
+
+    if rsi is not None and rsi > 65:
+        return {
+            "action": "WATCH", "priority": "LOW",
+            "reason": f"RSI {rsi:.0f} — stock running hard, let it move first",
+            "suggested_action": "Let it run; revisit when RSI cools to 45–60",
+        }
+
+    # RSI 40–65 is the sweet spot
+    vix_note = " — elevated IV = more premium" if vix_status != "NORMAL" else ""
+    priority = "HIGH" if (rsi is not None and 45 <= rsi <= 60) else "MEDIUM"
+
+    # Strike: 5% OTM, but never lock in a loss
+    raw_strike = round(price * 1.05, 0)
+    if avg_cost and raw_strike < avg_cost:
+        strike = round(avg_cost * 1.01, 0)
+        strike_note = f"Strike raised above avg cost (${avg_cost:.0f}) — don't lock in a loss"
+    else:
+        strike = raw_strike
+        strike_note = "Check IVR > 30 on Market Chameleon before entering"
+
+    rsi_str = f"RSI {rsi:.0f}" if rsi is not None else "RSI —"
+    return {
+        "action": "SELL CALL", "priority": priority,
+        "reason": f"{rsi_str} — stock stabilising, good covered call window{vix_note}",
+        "suggested_action": f"Sell 30-delta call ~${strike:.0f} at 30–45 DTE · {strike_note}",
+    }
+
+
+def _options_signal(analysis: dict, regime: dict, feasible: bool) -> dict:
+    rsi = analysis.get("rsi")
+    above_200 = analysis.get("above_200sma")
+    days_to_earnings = analysis.get("days_to_earnings")
+    regime_ok = regime.get("regime_ok", True)
+    vix_status = regime.get("vix_status", "NORMAL")
+
+    if not feasible:
+        return {
+            "action": "AVOID", "priority": "LOW",
+            "reason": "Insufficient capital for collateral",
+            "suggested_action": "Build portfolio to S$15,000+ to unlock options",
+        }
+
+    if days_to_earnings is not None and days_to_earnings < 30:
+        return {
+            "action": "AVOID", "priority": "HIGH",
+            "reason": f"Earnings in {days_to_earnings}d — IV crush risk after announcement",
+            "suggested_action": "Wait until after earnings, then re-evaluate",
+        }
+
+    if not above_200:
+        return {
+            "action": "AVOID", "priority": "HIGH",
+            "reason": "Below 200 SMA — downtrend, don't sell puts",
+            "suggested_action": "Wait for price to recover above 200 SMA",
+        }
+
+    if not regime_ok:
+        return {
+            "action": "AVOID", "priority": "MEDIUM",
+            "reason": "Market regime BEARISH — avoid new options positions",
+            "suggested_action": "Wait for SPY to reclaim its 200 SMA",
+        }
+
+    vix_note = " — elevated IV means higher premium" if vix_status != "NORMAL" else ""
+
+    if rsi is not None and rsi < 45:
+        return {
+            "action": "SELL PUT", "priority": "HIGH",
+            "reason": f"RSI {rsi:.0f} — oversold pullback, ideal put-selling entry{vix_note}",
+            "suggested_action": "Check IVR > 30, sell 30-delta put at 30–45 DTE",
+        }
+
+    if rsi is not None and rsi < 60:
+        return {
+            "action": "SELL PUT", "priority": "MEDIUM",
+            "reason": f"RSI {rsi:.0f} — neutral momentum, conditions acceptable{vix_note}",
+            "suggested_action": "Check IVR > 30, sell 30-delta put at 30–45 DTE",
+        }
+
+    return {
+        "action": "WATCH", "priority": "LOW",
+        "reason": f"RSI {rsi:.0f} — overbought, wait for pullback before selling put" if rsi else "No entry signal",
+        "suggested_action": "Wait for RSI < 60 then reassess",
+    }
+
+
 @app.get("/api/options-opportunities")
 async def options_opportunities():
     loop = asyncio.get_event_loop()
     regime = await loop.run_in_executor(None, get_market_regime)
     sgd_to_usd = regime.get("sgd_to_usd", 0.74)
 
+    # Build a weighted avg-cost map from open trades (Phase 2 detection)
+    open_rows = db.fetch("SELECT symbol, shares, entry_price FROM trades WHERE exit_price IS NULL")
+    position_map: dict[str, float] = {}
+    cost_accumulator: dict[str, dict] = {}
+    for row in open_rows:
+        sym = row["symbol"]
+        if sym not in cost_accumulator:
+            cost_accumulator[sym] = {"total_cost": 0.0, "total_shares": 0.0}
+        cost_accumulator[sym]["total_cost"] += row["entry_price"] * row["shares"]
+        cost_accumulator[sym]["total_shares"] += row["shares"]
+    for sym, v in cost_accumulator.items():
+        if v["total_shares"] > 0:
+            position_map[sym] = v["total_cost"] / v["total_shares"]
+
     opportunities = []
     for symbol in db.get_watchlist():
         analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
         if not analysis:
             continue
-        if not analysis.get("above_200sma") or analysis.get("earnings_warning"):
-            continue
 
         price = analysis["price"]
-        # ~30-delta put strike: ~7% OTM
-        strike = round(price * 0.93, 0)
-        collateral_usd = strike * 100
-        collateral_sgd = collateral_usd / sgd_to_usd
-        feasible = collateral_sgd <= PORTFOLIO_SIZE_SGD * 0.8
+        avg_cost = position_map.get(symbol)
+        phase = 2 if avg_cost is not None else 1
 
-        if feasible:
-            note = "Check IVR > 30 on Market Chameleon before entering"
+        if phase == 2:
+            # Covered call (Wheel Phase 2) — already hold shares
+            strike = round(price * 1.05, 0)
+            if avg_cost and strike < avg_cost:
+                strike = round(avg_cost * 1.01, 0)
+            options_signal = _covered_call_signal(analysis, regime, avg_cost)
+            strategy = "Covered Call (Wheel — Phase 2)"
+            collateral_sgd = 0.0  # no cash needed, stock is the collateral
         else:
-            note = f"Needs ~S${collateral_sgd:,.0f} collateral — above current portfolio size"
+            # Cash-secured put (Wheel Phase 1) — no position yet
+            strike = round(price * 0.93, 0)
+            collateral_usd = strike * 100
+            collateral_sgd = round(collateral_usd / sgd_to_usd, 0)
+            feasible = collateral_sgd <= PORTFOLIO_SIZE_SGD * 0.8
+            options_signal = _options_signal(analysis, regime, feasible)
+            strategy = "Cash-Secured Put (Wheel — Phase 1)"
 
         opportunities.append({
             "symbol": symbol,
-            "strategy": "Cash-Secured Put (Wheel)",
+            "phase": phase,
+            "strategy": strategy,
             "price": price,
             "suggested_strike": strike,
             "dte_target": "30–45 DTE",
-            "collateral_usd": round(collateral_usd, 2),
-            "collateral_sgd": round(collateral_sgd, 0),
-            "feasible": feasible,
-            "note": note,
+            "collateral_sgd": collateral_sgd,
+            "avg_cost": round(avg_cost, 2) if avg_cost else None,
+            "options_signal": options_signal,
             "rsi": analysis.get("rsi"),
             "days_to_earnings": analysis.get("days_to_earnings"),
+            "above_200sma": analysis.get("above_200sma"),
         })
+
+    # Sort: Phase 2 first (you already own it), then by action+priority
+    priority_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    action_order = {"SELL PUT": 0, "SELL CALL": 0, "WATCH": 1, "AVOID": 2}
+    opportunities.sort(key=lambda o: (
+        action_order.get(o["options_signal"]["action"], 3),
+        priority_order.get(o["options_signal"]["priority"], 3),
+        0 if o["phase"] == 2 else 1,
+    ))
 
     return {
         "opportunities": opportunities,
