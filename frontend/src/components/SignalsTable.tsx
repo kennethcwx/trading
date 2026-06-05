@@ -259,6 +259,37 @@ export function SignalsTable({ signals, group = 'core' }: { signals: SignalsResp
           <div className="py-10 text-center text-sm" style={{ color: '#555' }}>
             No signals in this category
           </div>
+        ) : group === 'screener' ? (
+          // Screener: visually group BUY and WATCH with section headers
+          (() => {
+            const buys    = filtered.filter(s => s.signal.action === 'BUY')
+            const watches = filtered.filter(s => s.signal.action === 'WATCH')
+            const SectionHeader = ({ label, count }: { label: string; count: number }) => (
+              <div className="px-5 py-2 flex items-center gap-2 border-b"
+                style={{ background: 'var(--surface-2)', borderColor: 'var(--border)' }}>
+                <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: '#666' }}>
+                  {label}
+                </span>
+                <span className="text-xs font-mono" style={{ color: '#444' }}>{count}</span>
+              </div>
+            )
+            return (
+              <>
+                {buys.length > 0 && (
+                  <>
+                    <SectionHeader label="Buy Setups" count={buys.length} />
+                    {buys.map(item => <SignalRow key={item.symbol} item={item} />)}
+                  </>
+                )}
+                {watches.length > 0 && (
+                  <>
+                    <SectionHeader label="Watching" count={watches.length} />
+                    {watches.map(item => <SignalRow key={item.symbol} item={item} />)}
+                  </>
+                )}
+              </>
+            )
+          })()
         ) : (
           filtered.map(item => <SignalRow key={item.symbol} item={item} />)
         )}
