@@ -7,24 +7,23 @@ const BADGE: Record<OptionsSignal['action'], { color: string; bg: string; border
   'AVOID':     { color: '#555',          bg: 'transparent',       border: 'transparent' },
 }
 
-function PremiumBox({ p, isCall }: { p: LivePremium | null; isCall: boolean }) {
-  if (!p) return <div className="text-xs" style={{ color: '#444' }}>Premium unavailable</div>
+function PremiumDisplay({ p, isCall }: { p: LivePremium | null; isCall: boolean }) {
+  if (!p) return <span className="text-xs" style={{ color: '#444' }}>—</span>
   const spread = p.ask - p.bid
-  const spreadTight = spread <= p.mid * 0.15
+  const wide = spread > p.mid * 0.15
   return (
-    <div className="space-y-1 text-xs">
+    <div className="space-y-1">
       <div className="flex items-baseline gap-2">
-        <span className="text-base font-bold font-mono" style={{ color: isCall ? 'var(--teal)' : 'var(--green)' }}>
+        <span className="text-2xl font-bold font-mono" style={{ color: isCall ? 'var(--teal)' : 'var(--green)' }}>
           ${p.mid.toFixed(2)}
         </span>
-        <span style={{ color: '#555' }}>mid · <span className="font-mono text-white">${p.total_contract.toFixed(0)}/contract</span></span>
+        <span className="text-xs" style={{ color: '#666' }}>mid · <span className="font-mono text-white">${p.total_contract.toFixed(0)}/contract</span></span>
       </div>
-      <div className="font-mono" style={{ color: spreadTight ? '#666' : 'var(--amber)' }}>
-        Bid ${p.bid.toFixed(2)} / Ask ${p.ask.toFixed(2)}
-        {!spreadTight && <span style={{ color: 'var(--amber)' }}> — wide spread</span>}
+      <div className="text-xs font-mono" style={{ color: wide ? 'var(--amber)' : '#555' }}>
+        Bid ${p.bid.toFixed(2)} / Ask ${p.ask.toFixed(2)}{wide ? ' ⚠ wide spread' : ''}
       </div>
-      <div style={{ color: '#555' }}>
-        Expiry <span className="text-white">{p.expiry}</span> · {p.dte}d
+      <div className="text-xs" style={{ color: '#555' }}>
+        Expiry <span className="text-white">{p.expiry}</span> · <span className="text-white">{p.dte}d</span>
         {p.iv_pct !== null && <span> · IV <span className="text-white">{p.iv_pct}%</span></span>}
       </div>
     </div>
@@ -37,7 +36,7 @@ function RsiBar({ rsi }: { rsi: number | null }) {
   const color = rsi > 70 ? 'var(--red)' : rsi < 40 ? 'var(--green)' : 'var(--yellow)'
   return (
     <div className="flex items-center gap-2">
-      <div className="w-12 h-1.5 rounded-full overflow-hidden flex-shrink-0" style={{ background: 'var(--border-2)' }}>
+      <div className="w-12 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-2)' }}>
         <div className="h-full rounded-full" style={{ width: `${pct}%`, background: color }} />
       </div>
       <span className="font-mono text-xs" style={{ color }}>{rsi.toFixed(0)}</span>
@@ -45,169 +44,152 @@ function RsiBar({ rsi }: { rsi: number | null }) {
   )
 }
 
-function OpportunityRow({ opp }: { opp: OptionsOpportunity }) {
+// ── Action card (SELL PUT / SELL CALL) ─────────────────────────────────────
+
+function ActionCard({ opp }: { opp: OptionsOpportunity }) {
   const { options_signal, phase, live_premium } = opp
   const badge = BADGE[options_signal.action]
-  const dimmed = options_signal.action === 'AVOID'
-  const isPhase2 = phase === 2
-
-  const pnlColor = opp.avg_cost && opp.price < opp.avg_cost ? 'var(--red)' : 'var(--green)'
-  const pnlPct = opp.avg_cost
-    ? (((opp.price - opp.avg_cost) / opp.avg_cost) * 100).toFixed(1)
-    : null
+  const isCall = phase === 2
 
   return (
-    <div
-      className="px-5 py-4 border-b last:border-0 flex flex-wrap items-start gap-4 transition-colors hover:bg-white/[0.02]"
-      style={{ borderColor: 'var(--border)', opacity: dimmed ? 0.45 : 1 }}
-    >
-      {/* Ticker + badge + phase */}
-      <div className="flex-shrink-0 w-36">
-        <div className="flex items-center gap-2">
-          <span className="font-bold text-white text-base">{opp.symbol}</span>
-          <span
-            className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full"
-            style={isPhase2
-              ? { background: 'var(--teal-dim)', color: 'var(--teal)', border: '1px solid rgba(0,212,170,0.2)' }
-              : { background: 'rgba(255,255,255,0.04)', color: '#555', border: '1px solid var(--border-2)' }
-            }
-          >
-            P{phase}
-          </span>
+    <div className="rounded-2xl border p-5" style={{ background: badge.bg, borderColor: badge.border }}>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        {/* Left: ticker + badge + phase */}
+        <div className="flex items-center gap-3">
+          <span className="text-2xl font-bold text-white">{opp.symbol}</span>
+          <div>
+            <span className="text-sm font-bold px-3 py-1 rounded-full block"
+              style={{ color: badge.color, background: badge.bg, border: `1px solid ${badge.border}` }}>
+              {options_signal.action}
+            </span>
+            <span className="text-[10px] mt-1 block text-center"
+              style={{ color: isCall ? 'var(--teal)' : 'var(--green)' }}>
+              {isCall ? 'Phase 2 · CC' : 'Phase 1 · CSP'}
+            </span>
+          </div>
         </div>
-        <span
-          className="text-[11px] font-bold px-2 py-0.5 rounded-full mt-1 inline-block"
-          style={{ color: badge.color, background: badge.bg, border: `1px solid ${badge.border}` }}
-        >
-          {options_signal.action}
-        </span>
+
+        {/* Right: premium */}
+        <PremiumDisplay p={live_premium} isCall={isCall} />
       </div>
 
-      {/* Price + strike + DTE */}
-      <div className="flex-shrink-0 w-28 space-y-1.5 text-xs" style={{ color: '#666' }}>
-        <div>Price <span className="font-mono text-white">${opp.price.toFixed(2)}</span></div>
-        <div>
-          Strike{' '}
-          <span className="font-mono" style={{ color: isPhase2 ? 'var(--teal)' : 'var(--orange)' }}>
-            ${opp.suggested_strike}
-          </span>
-          <span className="ml-1" style={{ color: '#444' }}>{isPhase2 ? '↑' : '↓'}</span>
-        </div>
-        <div>Expiry <span className="font-mono text-white">{opp.dte_target}</span></div>
-      </div>
+      {/* Reason */}
+      <p className="mt-3 text-sm" style={{ color: '#ccc' }}>{options_signal.reason}</p>
 
-      {/* Collateral / position context */}
-      <div className="flex-shrink-0 w-32 space-y-1.5 text-xs" style={{ color: '#666' }}>
-        {isPhase2 ? (
-          <>
-            <div style={{ color: '#555' }}>Collateral <span className="font-mono text-white">100 shares</span></div>
-            {opp.avg_cost && (
-              <div>
-                Avg cost{' '}
-                <span className="font-mono" style={{ color: '#999' }}>${opp.avg_cost.toFixed(2)}</span>
-              </div>
-            )}
-            {pnlPct && (
-              <div>
-                Position{' '}
-                <span className="font-mono font-semibold" style={{ color: pnlColor }}>
-                  {parseFloat(pnlPct) >= 0 ? '+' : ''}{pnlPct}%
-                </span>
-              </div>
-            )}
-          </>
-        ) : (
-          <>
-            <div>
-              Collateral{' '}
-              <span className="font-mono" style={{ color: 'var(--yellow)' }}>
-                {opp.collateral_sgd > 0 ? `S$${opp.collateral_sgd.toLocaleString()}` : '—'}
-              </span>
-            </div>
-            <div className="flex items-center gap-1">RSI <RsiBar rsi={opp.rsi} /></div>
-          </>
+      {/* Strike + collateral + RSI row */}
+      <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs font-mono" style={{ color: '#666' }}>
+        <span>Strike <span className="text-white">${opp.suggested_strike}</span></span>
+        {opp.collateral_sgd > 0 && (
+          <span>Collateral <span style={{ color: 'var(--yellow)' }}>S${opp.collateral_sgd.toLocaleString()}</span></span>
         )}
-        {isPhase2 && (
-          <div className="flex items-center gap-1">RSI <RsiBar rsi={opp.rsi} /></div>
+        {opp.avg_cost && (
+          <span>Avg cost <span className="text-white">${opp.avg_cost.toFixed(2)}</span></span>
         )}
+        <span>RSI <span className="text-white">{opp.rsi?.toFixed(0) ?? '—'}</span></span>
         {opp.days_to_earnings !== null && (
-          <div>Earnings <span className="font-mono text-white">{opp.days_to_earnings}d</span></div>
+          <span>Earnings <span className="text-white">{opp.days_to_earnings}d</span></span>
         )}
       </div>
 
-      {/* Reason + suggested action */}
-      <div className="flex-1 min-w-[160px] space-y-1 text-xs">
-        <div style={{ color: '#999' }}>{options_signal.reason}</div>
-        {options_signal.action !== 'AVOID' && (
-          <div style={{ color: '#555' }}>{options_signal.suggested_action}</div>
-        )}
-      </div>
-
-      {/* Live premium */}
-      {options_signal.action !== 'AVOID' && (
-        <div className="flex-shrink-0 w-52 border-l pl-4" style={{ borderColor: 'var(--border)' }}>
-          <div className="text-[10px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Live Premium</div>
-          <PremiumBox p={live_premium} isCall={phase === 2} />
-        </div>
-      )}
-
+      {/* Suggested action */}
+      <p className="mt-2 text-xs font-mono" style={{ color: '#777' }}>{options_signal.suggested_action}</p>
     </div>
   )
 }
+
+// ── Watch card ──────────────────────────────────────────────────────────────
+
+function WatchCard({ opp }: { opp: OptionsOpportunity }) {
+  const { options_signal } = opp
+  return (
+    <div className="rounded-2xl border p-4" style={{ background: 'var(--yellow-dim)', borderColor: 'rgba(255,214,10,0.15)' }}>
+      <div className="flex items-start justify-between gap-3">
+        <span className="text-lg font-bold text-white">{opp.symbol}</span>
+        <span className="text-[11px] font-bold px-2.5 py-1 rounded-full flex-shrink-0"
+          style={{ color: 'var(--yellow)', background: 'rgba(255,214,10,0.12)', border: '1px solid rgba(255,214,10,0.25)' }}>
+          WATCH
+        </span>
+      </div>
+      <p className="text-sm mt-2" style={{ color: '#bbb' }}>{options_signal.reason}</p>
+      <div className="mt-2 flex gap-4 text-xs font-mono" style={{ color: '#666' }}>
+        <span>Strike <span className="text-white">${opp.suggested_strike}</span></span>
+        <span className="flex items-center gap-1">RSI <RsiBar rsi={opp.rsi} /></span>
+        {opp.days_to_earnings !== null && <span>Earnings <span className="text-white">{opp.days_to_earnings}d</span></span>}
+      </div>
+      <p className="mt-1.5 text-xs font-mono" style={{ color: '#555' }}>{options_signal.suggested_action}</p>
+    </div>
+  )
+}
+
+// ── Main panel ──────────────────────────────────────────────────────────────
 
 export function OptionsPanel({ options }: { options: OptionsResponse }) {
   const actionable = options.opportunities.filter(
     o => o.options_signal.action === 'SELL PUT' || o.options_signal.action === 'SELL CALL'
   )
-  const phase2 = actionable.filter(o => o.phase === 2)
-  const phase1 = actionable.filter(o => o.phase === 1)
   const watching = options.opportunities.filter(o => o.options_signal.action === 'WATCH')
   const avoided  = options.opportunities.filter(o => o.options_signal.action === 'AVOID')
 
+  const phase2 = actionable.filter(o => o.phase === 2)
+  const phase1 = actionable.filter(o => o.phase === 1)
+
   return (
-    <div className="rounded-2xl border overflow-hidden" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
-      <div className="px-5 py-4 border-b flex items-center justify-between gap-3" style={{ borderColor: 'var(--border)' }}>
-        <div>
-          <h2 className="text-sm font-semibold text-white">Wheel Strategy</h2>
-          <p className="text-xs mt-0.5" style={{ color: '#555' }}>{options.note}</p>
-        </div>
-        <div className="flex gap-2 text-xs flex-shrink-0">
-          {phase2.length > 0 && (
-            <span className="px-2 py-1 rounded-lg font-semibold" style={{ background: 'var(--teal-dim)', color: 'var(--teal)', border: '1px solid rgba(0,212,170,0.25)' }}>
-              {phase2.length} call{phase2.length > 1 ? 's' : ''} to sell
-            </span>
-          )}
-          {phase1.length > 0 && (
-            <span className="px-2 py-1 rounded-lg font-semibold" style={{ background: 'var(--green-dim)', color: 'var(--green)', border: '1px solid rgba(0,200,5,0.25)' }}>
-              {phase1.length} put{phase1.length > 1 ? 's' : ''} to sell
-            </span>
-          )}
-          {watching.length > 0 && (
-            <span className="px-2 py-1 rounded-lg" style={{ background: 'var(--yellow-dim)', color: 'var(--yellow)', border: '1px solid rgba(255,214,10,0.25)' }}>
-              {watching.length} watching
-            </span>
-          )}
-        </div>
+    <div>
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 gap-1">
+        <h2 className="text-sm font-semibold" style={{ color: '#888' }}>Wheel Strategy</h2>
+        <span className="text-xs" style={{ color: '#555' }}>
+          Verify IVR &gt; 30 on Market Chameleon before executing
+        </span>
       </div>
 
-      {options.opportunities.length === 0 ? (
-        <div className="px-5 py-8 text-center text-sm" style={{ color: '#555' }}>
-          No watchlist symbols to evaluate
+      {/* No actionable — show empty state */}
+      {actionable.length === 0 && (
+        <div className="rounded-2xl border p-6 text-center" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+          <p className="text-sm font-medium text-white">No wheel entries right now.</p>
+          <p className="text-xs mt-1" style={{ color: '#666' }}>
+            {watching.length > 0 && `Watching ${watching.length} setup${watching.length > 1 ? 's' : ''} — conditions not quite there yet.`}
+          </p>
         </div>
-      ) : (
-        <div>
-          {[...phase2, ...phase1, ...watching, ...avoided].map(opp => (
-            <OpportunityRow key={opp.symbol} opp={opp} />
+      )}
+
+      {/* Action cards — Phase 2 (covered calls) first, then Phase 1 (CSP) */}
+      {actionable.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {[...phase2, ...phase1].map(opp => (
+            <ActionCard key={opp.symbol} opp={opp} />
+          ))}
+        </div>
+      )}
+
+      {/* Watch section */}
+      {watching.length > 0 && (
+        <div className="mt-4">
+          <div className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: '#555' }}>
+            Watching — not triggered yet
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {watching.map(opp => <WatchCard key={opp.symbol} opp={opp} />)}
+          </div>
+        </div>
+      )}
+
+      {/* Avoid footnote */}
+      {avoided.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {avoided.map(opp => (
+            <span key={opp.symbol} className="text-xs px-2.5 py-1 rounded-lg"
+              style={{ background: 'var(--surface)', border: '1px solid var(--border-2)', color: '#444' }}>
+              {opp.symbol} — {opp.options_signal.reason}
+            </span>
           ))}
         </div>
       )}
 
       {/* Legend */}
-      <div className="px-5 py-3 border-t flex flex-wrap gap-x-5 gap-y-1 text-[11px]"
-        style={{ borderColor: 'var(--border)', color: '#444' }}>
-        <span><span style={{ color: 'var(--teal)' }}>P2</span> = owns shares → sell covered call</span>
-        <span><span style={{ color: '#666' }}>P1</span> = no position → sell cash-secured put</span>
-        <span>IVR &gt; 30 required before entering</span>
+      <div className="mt-3 flex flex-wrap gap-x-4 text-[11px]" style={{ color: '#444' }}>
+        <span><span style={{ color: 'var(--teal)' }}>Phase 2</span> = owns shares → sell covered call</span>
+        <span><span style={{ color: '#666' }}>Phase 1</span> = no position → sell cash-secured put</span>
       </div>
     </div>
   )
