@@ -276,11 +276,9 @@ export default function App() {
               {/* List group selector */}
               <div className="flex gap-1 p-1 rounded-xl w-fit" style={{ background: 'var(--surface)' }}>
                 {([
-                  { id: 'core' as SignalGroup,          label: 'Core' },
-                  { id: 'long_term' as SignalGroup,      label: 'Long Term' },
-                  { id: 'quantum' as SignalGroup,        label: 'Quantum' },
-                  { id: 'covered_calls' as SignalGroup,  label: 'Covered Calls' },
-                  { id: 'screener' as SignalGroup,       label: 'Screener' },
+                  { id: 'core' as SignalGroup,      label: 'Watchlist' },
+                  { id: 'long_term' as SignalGroup,  label: 'Long Term' },
+                  { id: 'screener' as SignalGroup,   label: 'Screener' },
                 ] as { id: SignalGroup; label: string }[]).map(g => (
                   <button
                     key={g.id}
