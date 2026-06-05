@@ -129,6 +129,15 @@ async def signal_watcher():
                             PORTFOLIO_SIZE_SGD, d["analysis"]["price"],
                             d["analysis"]["stop_loss"], sgd_to_usd, size_mult,
                         )
+                        # Auto-register stop and target price alerts
+                        stop  = d["analysis"]["stop_loss"]
+                        target = d["analysis"]["profit_target"]
+                        aid_stop   = next(_alert_id_gen)
+                        aid_target = next(_alert_id_gen)
+                        _price_alerts[aid_stop]   = {"symbol": symbol, "target": stop,   "direction": "below"}
+                        _price_alerts[aid_target] = {"symbol": symbol, "target": target, "direction": "above"}
+                        logging.info(f"Auto-alerts set for {symbol}: SL ${stop:.2f} / TP ${target:.2f}")
+
                     msg = telegram_bot.format_signal(
                         symbol, signal, d["analysis"], pos_size, d["fundamentals"]
                     )

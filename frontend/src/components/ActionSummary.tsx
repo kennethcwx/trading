@@ -1,4 +1,4 @@
-import type { SignalsResponse, SignalItem, SignalAction, TickerAnalysis } from '../types'
+import type { SignalsResponse, SignalItem, SignalAction } from '../types'
 
 const BADGE: Record<SignalAction, { color: string; bg: string; border: string }> = {
   BUY:       { color: 'var(--green)',  bg: 'var(--green-dim)',  border: 'rgba(0,200,5,0.3)' },
@@ -45,29 +45,21 @@ function plainAction(item: SignalItem): string {
   return signal.suggested_action
 }
 
-function RsiProgress({ rsi, analysis }: { rsi: number | null; analysis: TickerAnalysis }) {
+function RsiProgress({ rsi, suggestedAction }: { rsi: number | null; suggestedAction: string }) {
   if (rsi === null) return null
-  // Show progress from current RSI down to 40 (trigger)
   const trigger = 40
   const pct = Math.min(100, Math.max(0, ((70 - rsi) / (70 - trigger)) * 100))
   const color = rsi < 45 ? 'var(--green)' : rsi < 50 ? 'var(--yellow)' : 'var(--orange)'
   return (
     <div className="mt-3 space-y-1.5">
       <div className="flex items-center justify-between text-xs" style={{ color: '#666' }}>
-        <span>RSI progress to trigger</span>
-        <span className="font-mono" style={{ color }}>{rsi.toFixed(0)} / need &lt;40</span>
+        <span>RSI to trigger</span>
+        <span className="font-mono" style={{ color }}>{rsi.toFixed(0)} → need &lt;40</span>
       </div>
       <div className="w-full h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-2)' }}>
         <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
       </div>
-      <div className="flex gap-4 text-xs font-mono" style={{ color: '#666' }}>
-        <span>Entry <span className="text-white">~${analysis.price.toFixed(2)}</span></span>
-        <span>Stop <span className="text-white">${analysis.stop_loss.toFixed(2)}</span></span>
-        <span>Target <span className="text-white">${analysis.profit_target.toFixed(2)}</span></span>
-        {analysis.high_20d > analysis.price && (
-          <span style={{ color: '#555' }}>Breakout at <span style={{ color: '#999' }}>${analysis.high_20d.toFixed(2)}</span></span>
-        )}
-      </div>
+      <p className="text-xs font-mono" style={{ color: '#777' }}>{suggestedAction}</p>
     </div>
   )
 }
@@ -87,7 +79,7 @@ function WatchCard({ item }: { item: SignalItem }) {
         </span>
       </div>
       <p className="text-sm mt-2" style={{ color: '#bbb' }}>{signal.reasons[0]}</p>
-      <RsiProgress rsi={analysis.rsi} analysis={analysis} />
+      <RsiProgress rsi={analysis.rsi} suggestedAction={signal.suggested_action} />
     </div>
   )
 }

@@ -158,14 +158,22 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
 
     if above_200 and rsi is not None and rsi < 55:
         pts_away = round(rsi - RSI_ENTRY)
+        # Estimate price level where RSI would hit 40 — each ATR is roughly 2-3 RSI pts
+        atr = analysis.get("atr", price * 0.02)
+        trigger_est = round(price - (pts_away / 2.5) * atr, 2)
+        trigger_stop = round(trigger_est - max(STOP_ATR_MULT * atr, trigger_est * (1 - STOP_MAX_PCT)), 2)
+        trigger_stop = max(trigger_stop, trigger_est * (1 - STOP_MAX_PCT))
+        trigger_stop = round(trigger_stop, 2)
+        trigger_target = round(trigger_est + PROFIT_RATIO * (trigger_est - trigger_stop), 2)
+
         momentum_note = (
             f" · or price breaks ${high_20d:.2f} (20d high) on volume"
             if high_20d and price < high_20d else ""
         )
         return _signal(
             "WATCH", "LOW",
-            [f"RSI {rsi:.0f} — needs to drop {pts_away} more pts to trigger (target <{RSI_ENTRY}){momentum_note}"],
-            f"Entry ~${price:.2f} · Stop ${stop:.2f} · Target ${target:.2f} · Risk:Reward 2:1",
+            [f"RSI {rsi:.0f} — {pts_away} pts from trigger{momentum_note}"],
+            f"Est. trigger ~${trigger_est:.2f} · Stop ~${trigger_stop:.2f} · Target ~${trigger_target:.2f}",
         )
 
     reasons = []
