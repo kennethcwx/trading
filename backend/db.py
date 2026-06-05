@@ -66,6 +66,43 @@ def init_db():
             symbol TEXT PRIMARY KEY
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS options_trades (
+            id            SERIAL PRIMARY KEY,
+            symbol        TEXT NOT NULL,
+            strategy      TEXT NOT NULL,
+            phase         INTEGER NOT NULL DEFAULT 1,
+            strike        REAL NOT NULL,
+            expiry_date   TEXT NOT NULL,
+            dte_at_entry  INTEGER,
+            premium       REAL NOT NULL,
+            contracts     INTEGER NOT NULL DEFAULT 1,
+            open_date     TEXT NOT NULL,
+            close_date    TEXT,
+            close_premium REAL,
+            status        TEXT NOT NULL DEFAULT 'open',
+            notes         TEXT,
+            created_at    TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """ if _USE_PG else """
+        CREATE TABLE IF NOT EXISTS options_trades (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol        TEXT NOT NULL,
+            strategy      TEXT NOT NULL,
+            phase         INTEGER NOT NULL DEFAULT 1,
+            strike        REAL NOT NULL,
+            expiry_date   TEXT NOT NULL,
+            dte_at_entry  INTEGER,
+            premium       REAL NOT NULL,
+            contracts     INTEGER NOT NULL DEFAULT 1,
+            open_date     TEXT NOT NULL,
+            close_date    TEXT,
+            close_premium REAL,
+            status        TEXT NOT NULL DEFAULT 'open',
+            notes         TEXT,
+            created_at    TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     cur.close()
     conn.close()

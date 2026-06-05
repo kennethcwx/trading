@@ -180,3 +180,29 @@ export interface TradesResponse {
 export interface WatchlistResponse {
   watchlist: string[]
 }
+
+export type OptionsTradeStatus = 'open' | 'expired' | 'closed' | 'assigned'
+
+export interface OptionsTrade {
+  id: number
+  symbol: string
+  strategy: string
+  phase: 1 | 2
+  strike: number
+  expiry_date: string
+  dte_at_entry: number | null
+  premium: number
+  contracts: number
+  open_date: string
+  close_date: string | null
+  close_premium: number | null
+  status: OptionsTradeStatus
+  notes: string | null
+  created_at: string
+  total_premium: number
+  pnl: number | null
+}
+
+export interface OptionsTradesResponse {
+  trades: OptionsTrade[]
+}

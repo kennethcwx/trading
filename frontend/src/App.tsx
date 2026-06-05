@@ -10,6 +10,7 @@ import { WatchlistEditor } from './components/WatchlistEditor'
 import { TradeLog } from './components/TradeLog'
 import { PnLChart } from './components/PnLChart'
 import { PortfolioSummary } from './components/PortfolioSummary'
+import { OptionsTradeLog } from './components/OptionsTradeLog'
 import type { MarketRegime, SignalsResponse, OptionsResponse, PortfolioResponse, Trade } from './types'
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000
@@ -328,6 +329,7 @@ export default function App() {
             <>
               <PnLChart trades={trades} />
               <TradeLog onTradesChange={setTrades} />
+              <OptionsTradeLog />
             </>
           )}
 

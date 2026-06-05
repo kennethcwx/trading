@@ -1,4 +1,4 @@
-import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, TradesResponse, WatchlistResponse } from './types'
+import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, TradesResponse, WatchlistResponse, OptionsTradesResponse } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? ''
 
@@ -52,6 +52,33 @@ export async function deleteTrade(id: number) {
 }
 
 export const fetchWatchlist = () => get<WatchlistResponse>('/watchlist')
+export const fetchOptionsTrades = () => get<OptionsTradesResponse>('/options-trades')
+
+export async function addOptionsTrade(data: {
+  symbol: string; strategy: string; phase: number
+  strike: number; expiry_date: string; dte_at_entry?: number
+  premium: number; contracts: number; open_date: string; notes?: string
+}) {
+  await apiFetch('/options-trades', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+}
+
+export async function closeOptionsTrade(id: number, data: {
+  close_date: string; close_premium: number; status: string; notes?: string
+}) {
+  await apiFetch(`/options-trades/${id}/close`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+}
+
+export async function deleteOptionsTrade(id: number) {
+  await apiFetch(`/options-trades/${id}`, { method: 'DELETE' })
+}
 
 export async function updateWatchlist(symbols: string[]) {
   await apiFetch('/watchlist', {

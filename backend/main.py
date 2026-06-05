@@ -136,6 +136,26 @@ class TradeClose(BaseModel):
     notes: str | None = None
 
 
+class OptionsTradeIn(BaseModel):
+    symbol: str
+    strategy: str
+    phase: int = 1
+    strike: float
+    expiry_date: str
+    dte_at_entry: int | None = None
+    premium: float
+    contracts: int = 1
+    open_date: str
+    notes: str | None = None
+
+
+class OptionsTradeClose(BaseModel):
+    close_date: str
+    close_premium: float   # 0 if expired worthless, >0 if closed early
+    status: str            # 'expired' | 'closed' | 'assigned'
+    notes: str | None = None
+
+
 async def handle_telegram_command(text: str):
     parts = text.strip().split()
     cmd = parts[0].lower().split("@")[0]
@@ -963,6 +983,58 @@ async def close_trade(trade_id: int, close: TradeClose):
 @app.delete("/api/trades/{trade_id}")
 async def delete_trade(trade_id: int):
     db.mutate("DELETE FROM trades WHERE id=?", (trade_id,))
+    return {"status": "ok"}
+
+
+@app.get("/api/options-trades")
+async def get_options_trades():
+    rows = db.fetch("SELECT * FROM options_trades ORDER BY open_date DESC")
+    trades = []
+    for row in rows:
+        t = dict(row)
+        contracts = t.get("contracts", 1)
+        premium = t["premium"]
+        total_premium = round(premium * 100 * contracts, 2)
+
+        if t["close_premium"] is not None:
+            close_total = round(t["close_premium"] * 100 * contracts, 2)
+            pnl = round(total_premium - close_total, 2)
+        else:
+            pnl = None
+
+        t["total_premium"] = total_premium
+        t["pnl"] = pnl
+        trades.append(t)
+    return {"trades": trades}
+
+
+@app.post("/api/options-trades")
+async def add_options_trade(trade: OptionsTradeIn):
+    db.mutate(
+        "INSERT INTO options_trades (symbol, strategy, phase, strike, expiry_date, dte_at_entry, premium, contracts, open_date, notes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (trade.symbol.upper(), trade.strategy, trade.phase, trade.strike,
+         trade.expiry_date, trade.dte_at_entry, trade.premium, trade.contracts,
+         trade.open_date, trade.notes),
+    )
+    return {"status": "ok"}
+
+
+@app.put("/api/options-trades/{trade_id}/close")
+async def close_options_trade(trade_id: int, close: OptionsTradeClose):
+    row = db.fetchone("SELECT id FROM options_trades WHERE id=? AND status='open'", (trade_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Trade not found or already closed")
+    db.mutate(
+        "UPDATE options_trades SET close_date=?, close_premium=?, status=?, notes=? WHERE id=?",
+        (close.close_date, close.close_premium, close.status, close.notes, trade_id),
+    )
+    return {"status": "ok"}
+
+
+@app.delete("/api/options-trades/{trade_id}")
+async def delete_options_trade(trade_id: int):
+    db.mutate("DELETE FROM options_trades WHERE id=?", (trade_id,))
     return {"status": "ok"}
 
 
