@@ -8,6 +8,23 @@ from config import (
     STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO, VIX_CAUTION, VIX_DEFENSIVE
 )
 
+SECTOR_ETF_MAP = {
+    "Technology":             "XLK",
+    "Health Care":            "XLV",
+    "Healthcare":             "XLV",
+    "Financials":             "XLF",
+    "Financial Services":     "XLF",
+    "Consumer Discretionary": "XLY",
+    "Communication Services": "XLC",
+    "Industrials":            "XLI",
+    "Consumer Staples":       "XLP",
+    "Energy":                 "XLE",
+    "Utilities":              "XLU",
+    "Real Estate":            "XLRE",
+    "Materials":              "XLB",
+    "Basic Materials":        "XLB",
+}
+
 _cache: dict = {}
 _cache_lock = threading.Lock()
 CACHE_TTL = 900  # 15 minutes
@@ -305,6 +322,41 @@ def get_relative_strength(symbol: str) -> dict:
         "rs_3m": rs_3m,
         "outperforming_3m": rs_3m > -10 if rs_3m is not None else True,
     }
+
+
+def get_sector_etf_status(symbol: str) -> dict | None:
+    """Return the sector ETF's trend status for a stock. None for ETFs or unknown sectors.
+    Cached 1 hour — sector membership doesn't change day to day."""
+    key = f"sector_etf:{symbol}"
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry and time.time() - entry["ts"] < 3600:
+            return entry["data"]
+
+    result = None
+    try:
+        info = yf.Ticker(symbol).info
+        is_etf = info.get("quoteType", "") in ("ETF", "MUTUALFUND") or not info.get("sector")
+        if not is_etf:
+            etf_sym = SECTOR_ETF_MAP.get(info.get("sector", ""))
+            if etf_sym:
+                hist = _fetch_history(etf_sym)
+                if not hist.empty and len(hist) >= SMA_LONG:
+                    close = hist["Close"]
+                    sma = float(close.rolling(SMA_LONG).mean().iloc[-1])
+                    price = float(close.iloc[-1])
+                    result = {
+                        "etf_symbol": etf_sym,
+                        "above_200sma": price > sma,
+                        "etf_price": round(price, 2),
+                        "etf_sma200": round(sma, 2),
+                    }
+    except Exception:
+        pass
+
+    with _cache_lock:
+        _cache[key] = {"data": result, "ts": time.time()}
+    return result
 
 
 def invalidate_cache():

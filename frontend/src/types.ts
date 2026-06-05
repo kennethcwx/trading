@@ -78,12 +78,20 @@ export interface RelativeStrength {
   outperforming_3m: boolean
 }
 
+export interface SectorEtf {
+  etf_symbol: string
+  above_200sma: boolean
+  etf_price: number
+  etf_sma200: number
+}
+
 export interface SignalItem {
   symbol: string
   in_portfolio: boolean
   analysis: TickerAnalysis
   fundamentals: Fundamentals | null
   rel_strength: RelativeStrength | null
+  sector_etf: SectorEtf | null
   signal: Signal
   position_size: PositionSize | null
 }

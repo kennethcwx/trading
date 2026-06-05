@@ -16,7 +16,7 @@ from pydantic import BaseModel
 import ibkr
 import db
 import telegram_bot
-from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, invalidate_cache
+from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, invalidate_cache
 from signals import generate_signal, calculate_position_size
 from config import PORTFOLIO_SIZE_SGD, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST
 
@@ -581,17 +581,48 @@ async def signals(group: str = "core"):
 
     all_symbols = list(dict.fromkeys(base_symbols + list(position_map.keys())))
 
-    results = []
+    # Pass 1: fetch all data
+    stock_data = []
     for symbol in all_symbols:
         analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
         if not analysis:
             continue
-
         fundamentals = await loop.run_in_executor(None, get_fundamentals, symbol)
         rel_strength = await loop.run_in_executor(None, get_relative_strength, symbol)
+        sector_status = await loop.run_in_executor(None, get_sector_etf_status, symbol)
+        stock_data.append({
+            "symbol": symbol,
+            "analysis": analysis,
+            "fundamentals": fundamentals,
+            "rel_strength": rel_strength,
+            "sector_status": sector_status,
+        })
 
+    # Compute RS percentile ranks within this symbol set
+    rs_entries = [
+        (d["symbol"], d["rel_strength"].get("rs_3m"))
+        for d in stock_data
+        if d["rel_strength"] and d["rel_strength"].get("rs_3m") is not None
+    ]
+    if len(rs_entries) > 1:
+        sorted_rs = sorted(rs_entries, key=lambda x: x[1])
+        n = len(sorted_rs)
+        rs_rank_map = {sym: round((i / (n - 1)) * 100) for i, (sym, _) in enumerate(sorted_rs)}
+    else:
+        rs_rank_map = {}
+
+    # Pass 2: generate signals with RS rank + sector confirmation
+    results = []
+    for d in stock_data:
+        symbol = d["symbol"]
         position = position_map.get(symbol)
-        signal = generate_signal(analysis, position, regime, fundamentals, rel_strength)
+        rs_rank = rs_rank_map.get(symbol)
+        sector_ok = d["sector_status"].get("above_200sma") if d["sector_status"] else None
+
+        signal = generate_signal(
+            d["analysis"], position, regime, d["fundamentals"], d["rel_strength"],
+            rs_rank=rs_rank, sector_ok=sector_ok,
+        )
 
         if group == "covered_calls":
             signal = _adapt_for_covered_calls(signal)
@@ -600,8 +631,8 @@ async def signals(group: str = "core"):
         if signal["action"] == "BUY":
             pos_size = calculate_position_size(
                 PORTFOLIO_SIZE_SGD,
-                analysis["price"],
-                analysis["stop_loss"],
+                d["analysis"]["price"],
+                d["analysis"]["stop_loss"],
                 sgd_to_usd,
                 size_mult,
             )
@@ -609,9 +640,10 @@ async def signals(group: str = "core"):
         results.append({
             "symbol": symbol,
             "in_portfolio": symbol in position_map,
-            "analysis": analysis,
-            "fundamentals": fundamentals,
-            "rel_strength": rel_strength,
+            "analysis": d["analysis"],
+            "fundamentals": d["fundamentals"],
+            "rel_strength": d["rel_strength"],
+            "sector_etf": d["sector_status"],
             "signal": signal,
             "position_size": pos_size,
         })

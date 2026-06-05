@@ -8,7 +8,9 @@ from config import (
 
 def generate_signal(analysis: dict, position: dict | None, regime: dict,
                     fundamentals: dict | None = None,
-                    rel_strength: dict | None = None) -> dict:
+                    rel_strength: dict | None = None,
+                    rs_rank: int | None = None,
+                    sector_ok: bool | None = None) -> dict:
     regime_ok = regime.get("regime_ok", True)
     vix_elevated = regime.get("vix_status") != "NORMAL"
 
@@ -88,6 +90,20 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
     )
 
     if mean_rev or momentum:
+        label = "Mean-reversion" if mean_rev else "Momentum breakout"
+
+        # ── Filter 1: RS rank — only top 25% within the current symbol set ──
+        if rs_rank is not None and rs_rank < 75:
+            return _signal("WATCH", "LOW",
+                           [f"{label} triggered but RS rank {rs_rank}th percentile — needs top 25%"],
+                           f"Wait for relative strength to improve · currently ranked {rs_rank}th percentile vs watchlist")
+
+        # ── Filter 2: Sector confirmation — sector ETF must be above 200 SMA ──
+        if sector_ok is False:
+            return _signal("WATCH", "LOW",
+                           [f"{label} triggered but sector ETF below 200 SMA — sector in downtrend"],
+                           "Wait for sector ETF to reclaim 200 SMA before entering")
+
         if mean_rev:
             tech_reasons = [f"Mean-reversion: RSI {rsi:.0f} < {RSI_ENTRY} + above 200 SMA"]
             if above_50:

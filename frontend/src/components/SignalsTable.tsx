@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { SignalsResponse, SignalItem, SignalAction, Fundamentals, RelativeStrength } from '../types'
+import type { SignalsResponse, SignalItem, SignalAction, Fundamentals, RelativeStrength, SectorEtf } from '../types'
 import type { SignalGroup } from '../api'
 
 const BADGE: Record<SignalAction, { color: string; bg: string; border: string }> = {
@@ -62,6 +62,18 @@ function GradeChip({ fund }: { fund: Fundamentals | null }) {
   )
 }
 
+function SectorCell({ etf }: { etf: SectorEtf | null }) {
+  if (!etf) return <span style={{ color: '#555' }}>—</span>
+  const color = etf.above_200sma ? 'var(--green)' : 'var(--red)'
+  const arrow = etf.above_200sma ? '▲' : '▼'
+  const title = `${etf.etf_symbol}: $${etf.etf_price} vs 200 SMA $${etf.etf_sma200} — ${etf.above_200sma ? 'above' : 'BELOW'}`
+  return (
+    <span className="text-xs font-mono font-medium" style={{ color }} title={title}>
+      {etf.etf_symbol} {arrow}
+    </span>
+  )
+}
+
 function RsCell({ rs }: { rs: RelativeStrength | null }) {
   if (!rs || rs.rs_3m === null) return <span style={{ color: '#555' }}>—</span>
   const v = rs.rs_3m
@@ -81,7 +93,7 @@ function EarningsWarning({ days, warning }: { days: number | null; warning: bool
 }
 
 function SignalRow({ item }: { item: SignalItem }) {
-  const { symbol, in_portfolio, analysis, fundamentals, rel_strength, signal, position_size } = item
+  const { symbol, in_portfolio, analysis, fundamentals, rel_strength, sector_etf, signal, position_size } = item
   const badge = BADGE[signal.action]
 
   return (
@@ -133,6 +145,10 @@ function SignalRow({ item }: { item: SignalItem }) {
         <div className="space-y-1 hidden md:block">
           <div className="text-[10px] uppercase tracking-wider" style={{ color: '#555' }}>vs SPY</div>
           <RsCell rs={rel_strength ?? null} />
+        </div>
+        <div className="space-y-1 hidden lg:block">
+          <div className="text-[10px] uppercase tracking-wider" style={{ color: '#555' }}>Sector</div>
+          <SectorCell etf={sector_etf ?? null} />
         </div>
         {analysis.earnings_warning && (
           <div className="hidden sm:block">
