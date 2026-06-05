@@ -166,16 +166,35 @@ export function ActionSummary({ signals }: { signals: SignalsResponse }) {
         </div>
       )}
 
-      {watches.length > 0 && (
-        <div className="mt-4">
-          <div className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: '#555' }}>
-            Watching — not triggered yet
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {watches.map(item => <WatchCard key={item.symbol} item={item} />)}
-          </div>
-        </div>
-      )}
+      {watches.length > 0 && (() => {
+        const almostThere = watches.filter(w => (w.analysis.rsi ?? 99) < 44)
+        const approaching = watches.filter(w => { const r = w.analysis.rsi ?? 99; return r >= 44 && r < 50 })
+        const early       = watches.filter(w => (w.analysis.rsi ?? 99) >= 50)
+
+        const Section = ({ label, items, dim }: { label: string; items: typeof watches; dim?: boolean }) =>
+          items.length === 0 ? null : (
+            <div className="mt-4">
+              <div className="text-xs font-semibold uppercase tracking-wider mb-3 flex items-center gap-2"
+                style={{ color: dim ? '#444' : '#666' }}>
+                {label}
+                <span className="font-normal normal-case tracking-normal" style={{ color: '#444' }}>
+                  ({items.length})
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" style={{ opacity: dim ? 0.6 : 1 }}>
+                {items.map(item => <WatchCard key={item.symbol} item={item} />)}
+              </div>
+            </div>
+          )
+
+        return (
+          <>
+            <Section label="Almost There" items={almostThere} />
+            <Section label="Approaching" items={approaching} />
+            <Section label="Early Watch" items={early} dim />
+          </>
+        )
+      })()}
 
       {(holds > 0 || skips > 0) && (
         <div className="mt-3 flex flex-wrap gap-3 text-xs" style={{ color: '#555' }}>
