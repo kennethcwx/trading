@@ -48,18 +48,36 @@ function plainAction(item: SignalItem): string {
 function RsiProgress({ rsi, suggestedAction }: { rsi: number | null; suggestedAction: string }) {
   if (rsi === null) return null
   const trigger = 40
+  const ptsAway = Math.max(0, rsi - trigger)
   const pct = Math.min(100, Math.max(0, ((70 - rsi) / (70 - trigger)) * 100))
   const color = rsi < 45 ? 'var(--green)' : rsi < 50 ? 'var(--yellow)' : 'var(--orange)'
+
+  // Extract proximity label (first sentence before ·)
+  const [proximity, tradeInfo] = suggestedAction.split(' · At current price: ')
+
   return (
-    <div className="mt-3 space-y-1.5">
-      <div className="flex items-center justify-between text-xs" style={{ color: '#666' }}>
-        <span>RSI to trigger</span>
-        <span className="font-mono" style={{ color }}>{rsi.toFixed(0)} → need &lt;40</span>
+    <div className="mt-3 space-y-2">
+      {/* Proximity label */}
+      <div className="text-xs font-medium" style={{ color }}>
+        {proximity}
       </div>
-      <div className="w-full h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-2)' }}>
-        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+
+      {/* RSI bar */}
+      <div className="flex items-center gap-2">
+        <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-2)' }}>
+          <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+        </div>
+        <span className="text-xs font-mono flex-shrink-0" style={{ color }}>
+          RSI {rsi.toFixed(0)} — {ptsAway} pts to go
+        </span>
       </div>
-      <p className="text-xs font-mono" style={{ color: '#777' }}>{suggestedAction}</p>
+
+      {/* Stop/target at current price */}
+      {tradeInfo && (
+        <p className="text-xs font-mono" style={{ color: '#555' }}>
+          If triggered now: {tradeInfo}
+        </p>
+      )}
     </div>
   )
 }
