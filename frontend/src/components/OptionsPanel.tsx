@@ -1,10 +1,34 @@
-import type { OptionsResponse, OptionsOpportunity, OptionsSignal } from '../types'
+import type { OptionsResponse, OptionsOpportunity, OptionsSignal, LivePremium } from '../types'
 
 const BADGE: Record<OptionsSignal['action'], { color: string; bg: string; border: string }> = {
   'SELL PUT':  { color: 'var(--green)',  bg: 'var(--green-dim)',  border: 'rgba(0,200,5,0.25)' },
   'SELL CALL': { color: 'var(--teal)',   bg: 'var(--teal-dim)',   border: 'rgba(0,212,170,0.25)' },
   'WATCH':     { color: 'var(--yellow)', bg: 'var(--yellow-dim)', border: 'rgba(255,214,10,0.25)' },
   'AVOID':     { color: '#555',          bg: 'transparent',       border: 'transparent' },
+}
+
+function PremiumBox({ p, isCall }: { p: LivePremium | null; isCall: boolean }) {
+  if (!p) return <div className="text-xs" style={{ color: '#444' }}>Premium unavailable</div>
+  const spread = p.ask - p.bid
+  const spreadTight = spread <= p.mid * 0.15
+  return (
+    <div className="space-y-1 text-xs">
+      <div className="flex items-baseline gap-2">
+        <span className="text-base font-bold font-mono" style={{ color: isCall ? 'var(--teal)' : 'var(--green)' }}>
+          ${p.mid.toFixed(2)}
+        </span>
+        <span style={{ color: '#555' }}>mid · <span className="font-mono text-white">${p.total_contract.toFixed(0)}/contract</span></span>
+      </div>
+      <div className="font-mono" style={{ color: spreadTight ? '#666' : 'var(--amber)' }}>
+        Bid ${p.bid.toFixed(2)} / Ask ${p.ask.toFixed(2)}
+        {!spreadTight && <span style={{ color: 'var(--amber)' }}> — wide spread</span>}
+      </div>
+      <div style={{ color: '#555' }}>
+        Expiry <span className="text-white">{p.expiry}</span> · {p.dte}d
+        {p.iv_pct !== null && <span> · IV <span className="text-white">{p.iv_pct}%</span></span>}
+      </div>
+    </div>
+  )
 }
 
 function RsiBar({ rsi }: { rsi: number | null }) {
@@ -22,7 +46,7 @@ function RsiBar({ rsi }: { rsi: number | null }) {
 }
 
 function OpportunityRow({ opp }: { opp: OptionsOpportunity }) {
-  const { options_signal, phase } = opp
+  const { options_signal, phase, live_premium } = opp
   const badge = BADGE[options_signal.action]
   const dimmed = options_signal.action === 'AVOID'
   const isPhase2 = phase === 2
@@ -118,6 +142,15 @@ function OpportunityRow({ opp }: { opp: OptionsOpportunity }) {
           <div style={{ color: '#555' }}>{options_signal.suggested_action}</div>
         )}
       </div>
+
+      {/* Live premium */}
+      {options_signal.action !== 'AVOID' && (
+        <div className="flex-shrink-0 w-52 border-l pl-4" style={{ borderColor: 'var(--border)' }}>
+          <div className="text-[10px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Live Premium</div>
+          <PremiumBox p={live_premium} isCall={phase === 2} />
+        </div>
+      )}
+
     </div>
   )
 }

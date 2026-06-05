@@ -16,7 +16,7 @@ from pydantic import BaseModel
 import ibkr
 import db
 import telegram_bot
-from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, invalidate_cache
+from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, invalidate_cache
 from signals import generate_signal, calculate_position_size
 from config import PORTFOLIO_SIZE_SGD, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE
 
@@ -876,7 +876,8 @@ async def options_opportunities():
                 strike = round(avg_cost * 1.01, 0)
             options_signal = _covered_call_signal(analysis, regime, avg_cost)
             strategy = "Covered Call (Wheel — Phase 2)"
-            collateral_sgd = 0.0  # no cash needed, stock is the collateral
+            collateral_sgd = 0.0
+            option_type = "call"
         else:
             # Cash-secured put (Wheel Phase 1) — no position yet
             strike = round(price * 0.93, 0)
@@ -885,6 +886,11 @@ async def options_opportunities():
             feasible = collateral_sgd <= PORTFOLIO_SIZE_SGD * 0.8
             options_signal = _options_signal(analysis, regime, feasible)
             strategy = "Cash-Secured Put (Wheel — Phase 1)"
+            option_type = "put"
+
+        live_premium = await loop.run_in_executor(
+            None, get_options_premium, symbol, float(strike), option_type
+        )
 
         opportunities.append({
             "symbol": symbol,
@@ -896,6 +902,7 @@ async def options_opportunities():
             "collateral_sgd": collateral_sgd,
             "avg_cost": round(avg_cost, 2) if avg_cost else None,
             "options_signal": options_signal,
+            "live_premium": live_premium,
             "rsi": analysis.get("rsi"),
             "days_to_earnings": analysis.get("days_to_earnings"),
             "above_200sma": analysis.get("above_200sma"),

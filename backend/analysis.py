@@ -324,6 +324,68 @@ def get_relative_strength(symbol: str) -> dict:
     }
 
 
+def get_options_premium(symbol: str, target_strike: float, option_type: str = "put") -> dict | None:
+    """Fetch live bid/ask/mid for the nearest 30-45 DTE option at the target strike.
+    option_type: 'put' for CSP (Phase 1), 'call' for CC (Phase 2). Cached 10 min."""
+    import datetime as _dt
+    key = f"options_premium:{symbol}:{target_strike}:{option_type}"
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry and time.time() - entry["ts"] < 600:
+            return entry["data"]
+
+    result = None
+    try:
+        ticker = yf.Ticker(symbol)
+        expirations = ticker.options
+        if not expirations:
+            raise ValueError("no expirations")
+
+        today = _dt.date.today()
+        # Find expiry closest to 38 DTE within 25-55 day window
+        best_expiry, best_dte = None, None
+        for exp_str in expirations:
+            dte = (_dt.date.fromisoformat(exp_str) - today).days
+            if 25 <= dte <= 55:
+                if best_dte is None or abs(dte - 38) < abs(best_dte - 38):
+                    best_expiry, best_dte = exp_str, dte
+
+        if not best_expiry:
+            raise ValueError("no suitable expiry")
+
+        chain = ticker.option_chain(best_expiry)
+        opts = chain.puts if option_type == "put" else chain.calls
+        if opts.empty:
+            raise ValueError("empty chain")
+
+        opts = opts.copy()
+        opts["strike_diff"] = (opts["strike"] - target_strike).abs()
+        row = opts.loc[opts["strike_diff"].idxmin()]
+
+        bid  = float(row.get("bid", 0) or 0)
+        ask  = float(row.get("ask", 0) or 0)
+        last = float(row.get("lastPrice", 0) or 0)
+        mid  = round((bid + ask) / 2, 2) if bid > 0 and ask > 0 else last
+        iv   = float(row.get("impliedVolatility", 0) or 0)
+
+        result = {
+            "expiry":        best_expiry,
+            "dte":           best_dte,
+            "strike":        float(row["strike"]),
+            "bid":           round(bid, 2),
+            "ask":           round(ask, 2),
+            "mid":           round(mid, 2),
+            "total_contract": round(mid * 100, 2),
+            "iv_pct":        round(iv * 100, 1) if iv else None,
+        }
+    except Exception:
+        pass
+
+    with _cache_lock:
+        _cache[key] = {"data": result, "ts": time.time()}
+    return result
+
+
 def get_sector_etf_status(symbol: str) -> dict | None:
     """Return the sector ETF's trend status for a stock. None for ETFs or unknown sectors.
     Cached 1 hour — sector membership doesn't change day to day."""

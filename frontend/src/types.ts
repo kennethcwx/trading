@@ -133,6 +133,17 @@ export interface OptionsSignal {
   suggested_action: string
 }
 
+export interface LivePremium {
+  expiry: string
+  dte: number
+  strike: number
+  bid: number
+  ask: number
+  mid: number
+  total_contract: number
+  iv_pct: number | null
+}
+
 export interface OptionsOpportunity {
   symbol: string
   phase: 1 | 2
@@ -143,6 +154,7 @@ export interface OptionsOpportunity {
   collateral_sgd: number
   avg_cost: number | null
   options_signal: OptionsSignal
+  live_premium: LivePremium | null
   rsi: number | null
   days_to_earnings: number | null
   above_200sma: boolean | null
