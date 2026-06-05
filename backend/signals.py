@@ -165,7 +165,7 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         return _signal(
             "WATCH", "LOW",
             [f"RSI {rsi:.0f} — needs to drop {pts_away} more pts to trigger (target <{RSI_ENTRY}){momentum_note}"],
-            f"Entry setup when triggered: Stop ${stop:.2f} · Target ${target:.2f} · Risk:Reward 2:1",
+            f"Entry ~${price:.2f} · Stop ${stop:.2f} · Target ${target:.2f} · Risk:Reward 2:1",
         )
 
     reasons = []

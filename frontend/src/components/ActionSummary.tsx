@@ -61,6 +61,7 @@ function RsiProgress({ rsi, analysis }: { rsi: number | null; analysis: TickerAn
         <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
       </div>
       <div className="flex gap-4 text-xs font-mono" style={{ color: '#666' }}>
+        <span>Entry <span className="text-white">~${analysis.price.toFixed(2)}</span></span>
         <span>Stop <span className="text-white">${analysis.stop_loss.toFixed(2)}</span></span>
         <span>Target <span className="text-white">${analysis.profit_target.toFixed(2)}</span></span>
         {analysis.high_20d > analysis.price && (
