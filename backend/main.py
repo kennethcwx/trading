@@ -18,7 +18,7 @@ import db
 import telegram_bot
 from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE
+from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE
 
 logging.basicConfig(level=logging.INFO)
 
@@ -791,6 +791,8 @@ async def signals(group: str = "core"):
         base_symbols = COVERED_CALLS_WATCHLIST
     elif group == "screener":
         base_symbols = SCREENER_UNIVERSE
+    elif group == "long_term":
+        base_symbols = LONGTERM_WATCHLIST
     else:
         base_symbols = db.get_watchlist()
 
@@ -843,11 +845,15 @@ async def signals(group: str = "core"):
 
         if group == "covered_calls":
             signal = _adapt_for_covered_calls(signal)
+        elif group == "long_term":
+            signal = _adapt_for_longterm(signal)
 
         pos_size = None
         if signal["action"] == "BUY":
+            # Long-term: fixed S$150 accumulation amount instead of full risk-based size
+            lt_size = 150 if group == "long_term" else None
             pos_size = calculate_position_size(
-                PORTFOLIO_SIZE_SGD,
+                lt_size or PORTFOLIO_SIZE_SGD,
                 d["analysis"]["price"],
                 d["analysis"]["stop_loss"],
                 sgd_to_usd,
@@ -918,6 +924,37 @@ def _adapt_for_covered_calls(signal: dict) -> dict:
             **signal,
             "suggested_action": f"Buy back any open covered call first, then {base[0].lower() + base[1:]}",
         }
+
+    return signal
+
+
+def _adapt_for_longterm(signal: dict) -> dict:
+    """Post-process a signal for the long-term holds group.
+    These are accumulation positions held for years — suppress short-term exits,
+    reframe BUY as accumulation, treat SELL signals as hold-and-review.
+    """
+    action = signal["action"]
+
+    if action == "BUY":
+        return {**signal,
+                "suggested_action": "Accumulate fractional shares · hold for 1–3 years · size S$100–200"}
+
+    if action == "WATCH":
+        return {**signal,
+                "suggested_action": signal["suggested_action"].replace(
+                    "At current price", "If triggered")}
+
+    if action in ("SELL_HALF", "SELL"):
+        # Don't exit long-term positions on routine overbought signals
+        return {**signal,
+                "action": "HOLD",
+                "priority": "LOW",
+                "reasons": ["Long-term hold — short-term exit signal suppressed"],
+                "suggested_action": "Hold · only exit if fundamental thesis breaks (missed earnings, sector decline)"}
+
+    if action == "HOLD":
+        return {**signal,
+                "suggested_action": "Hold · long-term position · ignore short-term noise"}
 
     return signal
 

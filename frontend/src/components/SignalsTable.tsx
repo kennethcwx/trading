@@ -187,6 +187,7 @@ const ACTIONABLE: SignalAction[] = ['BUY', 'SELL', 'SELL_HALF', 'REVIEW']
 
 const GROUP_META: Record<SignalGroup, { label: string; desc: string }> = {
   core:          { label: 'Core',          desc: 'Swing trades · RSI + Donchian signals' },
+  long_term:     { label: 'Long Term',     desc: 'Accumulate on dips · hold 1–3 years · fractional shares · short-term exits suppressed' },
   quantum:       { label: 'Quantum',       desc: 'Long-term trend positions · IONQ & QBTS priority' },
   covered_calls: { label: 'Covered Calls', desc: 'High-IV stocks · momentum entries only · once in position, see Wheel Strategy panel for call timing' },
   screener:      { label: 'Screener',      desc: '70 stocks scanned · BUY and WATCH setups only · RS rank + sector filter applied' },

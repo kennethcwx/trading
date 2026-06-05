@@ -4,6 +4,14 @@ PORTFOLIO_CURRENCY = "SGD"
 # Core watchlist — swing trades, technical signals apply
 WATCHLIST = ["AAPL", "MSFT", "NVDA", "BAC", "AMD", "CAT", "ABBV", "AMZN"]
 
+# Long-term growth holdings — accumulate on dips, hold for 1–3 years, fractional shares ok
+# Options not viable on these (collateral too high for S$5k portfolio)
+LONGTERM_WATCHLIST = [
+    "NVDA", "MSFT", "AMZN", "META", "GOOGL",   # mega-cap tech
+    "TSLA", "AVGO", "TSM",                       # semis + EV
+    "LLY", "UNH",                                # healthcare compounders
+]
+
 # Quantum computing — long-term positions, trend-driven (IONQ + QBTS priority)
 QUANTUM_WATCHLIST = ["IONQ", "QBTS", "RGTI", "IBM"]
 
