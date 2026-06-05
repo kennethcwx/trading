@@ -189,6 +189,7 @@ const GROUP_META: Record<SignalGroup, { label: string; desc: string }> = {
   core:          { label: 'Core',          desc: 'Swing trades · RSI + Donchian signals' },
   quantum:       { label: 'Quantum',       desc: 'Long-term trend positions · IONQ & QBTS priority' },
   covered_calls: { label: 'Covered Calls', desc: 'High-IV stocks · momentum entries only · once in position, see Wheel Strategy panel for call timing' },
+  screener:      { label: 'Screener',      desc: '70 stocks scanned · BUY and WATCH setups only · RS rank + sector filter applied' },
 }
 
 export function SignalsTable({ signals, group = 'core' }: { signals: SignalsResponse; group?: SignalGroup }) {

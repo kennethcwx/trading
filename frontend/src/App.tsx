@@ -292,6 +292,7 @@ export default function App() {
                   { id: 'core' as SignalGroup,          label: 'Core' },
                   { id: 'quantum' as SignalGroup,        label: 'Quantum' },
                   { id: 'covered_calls' as SignalGroup,  label: 'Covered Calls' },
+                  { id: 'screener' as SignalGroup,       label: 'Screener' },
                 ] as { id: SignalGroup; label: string }[]).map(g => (
                   <button
                     key={g.id}

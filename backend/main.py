@@ -18,7 +18,7 @@ import db
 import telegram_bot
 from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST
+from config import PORTFOLIO_SIZE_SGD, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE
 
 logging.basicConfig(level=logging.INFO)
 
@@ -159,7 +159,11 @@ async def handle_telegram_command(text: str):
 
     elif cmd == "/briefing":
         telegram_bot.send("⏳ Generating briefing…")
-        await send_morning_briefing()
+        try:
+            await send_morning_briefing()
+        except Exception as e:
+            logging.warning(f"/briefing error: {e}")
+            telegram_bot.send(f"❌ Briefing failed — check backend logs.\n<code>{e}</code>")
 
     elif cmd == "/status":
         regime = await loop.run_in_executor(None, get_market_regime)
@@ -576,20 +580,24 @@ async def signals(group: str = "core"):
         base_symbols = QUANTUM_WATCHLIST
     elif group == "covered_calls":
         base_symbols = COVERED_CALLS_WATCHLIST
+    elif group == "screener":
+        base_symbols = SCREENER_UNIVERSE
     else:
         base_symbols = db.get_watchlist()
 
     all_symbols = list(dict.fromkeys(base_symbols + list(position_map.keys())))
 
-    # Pass 1: fetch all data
+    # Pass 1: fetch all data — fundamentals/RS/sector run concurrently per symbol
     stock_data = []
     for symbol in all_symbols:
         analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
         if not analysis:
             continue
-        fundamentals = await loop.run_in_executor(None, get_fundamentals, symbol)
-        rel_strength = await loop.run_in_executor(None, get_relative_strength, symbol)
-        sector_status = await loop.run_in_executor(None, get_sector_etf_status, symbol)
+        fundamentals, rel_strength, sector_status = await asyncio.gather(
+            loop.run_in_executor(None, get_fundamentals, symbol),
+            loop.run_in_executor(None, get_relative_strength, symbol),
+            loop.run_in_executor(None, get_sector_etf_status, symbol),
+        )
         stock_data.append({
             "symbol": symbol,
             "analysis": analysis,
@@ -648,8 +656,14 @@ async def signals(group: str = "core"):
             "position_size": pos_size,
         })
 
+    # Screener: only surface actionable setups — skip holds, skips, and exits
+    if group == "screener":
+        results = [r for r in results if r["signal"]["action"] in ("BUY", "WATCH")]
+
     priority_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    action_order = {"BUY": 0, "WATCH": 1}
     results.sort(key=lambda x: (
+        action_order.get(x["signal"]["action"], 2),
         priority_order.get(x["signal"]["priority"], 3),
         0 if x["in_portfolio"] else 1,
     ))

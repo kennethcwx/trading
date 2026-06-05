@@ -10,6 +10,33 @@ QUANTUM_WATCHLIST = ["IONQ", "QBTS", "RGTI", "IBM"]
 # Covered calls — liquid options, elevated IV, momentum-only entries (MU + ARM priority)
 COVERED_CALLS_WATCHLIST = ["MU", "ARM", "SOFI", "F", "COIN"]
 
+# Wide screener — 70 liquid, optionable stocks across all sectors
+# Scanned daily; only BUY and WATCH setups are surfaced
+SCREENER_UNIVERSE = [
+    # Mega-cap
+    "AAPL", "MSFT", "NVDA", "META", "GOOGL", "AMZN", "TSLA",
+    # Semiconductors
+    "AMD", "INTC", "QCOM", "AVGO", "MU", "TSM", "ARM", "AMAT", "LRCX",
+    # Software / Cloud
+    "CRM", "ADBE", "ORCL", "NOW", "INTU", "PANW", "SNOW", "PLTR", "DDOG",
+    # Financials
+    "JPM", "GS", "MS", "BAC", "WFC", "V", "MA", "AXP", "COIN",
+    # Healthcare
+    "UNH", "JNJ", "LLY", "ABBV", "MRK", "AMGN", "GILD", "REGN",
+    # Consumer Discretionary
+    "HD", "MCD", "SBUX", "NKE", "LULU", "CMG", "COST", "TGT",
+    # Energy
+    "XOM", "CVX", "OXY", "SLB",
+    # Industrials
+    "CAT", "DE", "RTX", "HON", "GE", "BA",
+    # High-IV / momentum
+    "SOFI", "F", "HOOD", "RBLX",
+    # Quantum
+    "IONQ", "QBTS",
+    # Index ETFs
+    "SPY", "QQQ", "IWM",
+]
+
 # Risk rules
 RISK_PER_TRADE_PCT = 0.01    # 1% portfolio risk per trade
 MAX_POSITION_PCT = 0.10      # 10% max per position
