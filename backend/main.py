@@ -222,6 +222,7 @@ async def handle_telegram_command(text: str):
     if cmd == "/help":
         telegram_bot.send(
             "<b>Available commands</b>\n\n"
+            "/scan — scan 70 stocks for BUY setups + wheel opportunities\n"
             "/signal AAPL — current signal for any ticker\n"
             "/share AAPL — shareable summary to send to friends\n"
             "/positions — your open trades with live P&L\n"
@@ -242,6 +243,15 @@ async def handle_telegram_command(text: str):
         except Exception as e:
             logging.warning(f"/briefing error: {e}")
             telegram_bot.send(f"❌ Briefing failed — check backend logs.\n<code>{e}</code>")
+
+    elif cmd == "/scan":
+        telegram_bot.send("🔍 Scanning 70 stocks — this takes ~30s…")
+        try:
+            scan = await run_screener_scan()
+            telegram_bot.send(telegram_bot.format_scan_results(scan))
+        except Exception as e:
+            logging.warning(f"/scan error: {e}")
+            telegram_bot.send(f"❌ Scan failed.\n<code>{e}</code>")
 
     elif cmd == "/status":
         regime = await loop.run_in_executor(None, get_market_regime)
@@ -473,6 +483,107 @@ async def handle_telegram_command(text: str):
         telegram_bot.send("Unknown command. Type /help to see what's available.")
 
 
+async def run_screener_scan() -> dict:
+    """Scan the full SCREENER_UNIVERSE for BUY setups and Wheel opportunities."""
+    loop = asyncio.get_event_loop()
+    regime = await loop.run_in_executor(None, get_market_regime)
+    sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+    size_mult = regime.get("new_position_size_multiplier", 1.0)
+
+    # Pass 1: fetch all data concurrently per symbol
+    stock_data = []
+    for symbol in SCREENER_UNIVERSE:
+        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+        if not analysis:
+            continue
+        fundamentals, rel_strength, sector_status = await asyncio.gather(
+            loop.run_in_executor(None, get_fundamentals, symbol),
+            loop.run_in_executor(None, get_relative_strength, symbol),
+            loop.run_in_executor(None, get_sector_etf_status, symbol),
+        )
+        stock_data.append({
+            "symbol": symbol, "analysis": analysis,
+            "fundamentals": fundamentals, "rel_strength": rel_strength,
+            "sector_status": sector_status,
+        })
+
+    # RS ranks
+    rs_entries = [
+        (d["symbol"], d["rel_strength"].get("rs_3m"))
+        for d in stock_data
+        if d["rel_strength"] and d["rel_strength"].get("rs_3m") is not None
+    ]
+    if len(rs_entries) > 1:
+        sorted_rs = sorted(rs_entries, key=lambda x: x[1])
+        n = len(sorted_rs)
+        rs_rank_map = {sym: round((i / (n - 1)) * 100) for i, (sym, _) in enumerate(sorted_rs)}
+    else:
+        rs_rank_map = {}
+
+    buy_signals, watch_signals, wheel_signals = [], [], []
+
+    for d in stock_data:
+        symbol = d["symbol"]
+        rs_rank = rs_rank_map.get(symbol)
+        sector_ok = d["sector_status"].get("above_200sma") if d["sector_status"] else None
+        signal = generate_signal(
+            d["analysis"], None, regime, d["fundamentals"], d["rel_strength"],
+            rs_rank=rs_rank, sector_ok=sector_ok,
+        )
+        action = signal["action"]
+
+        if action == "BUY":
+            pos_size = calculate_position_size(
+                PORTFOLIO_SIZE_SGD, d["analysis"]["price"],
+                d["analysis"]["stop_loss"], sgd_to_usd, size_mult,
+            )
+            buy_signals.append({
+                "symbol": symbol, "signal": signal, "analysis": d["analysis"],
+                "fundamentals": d["fundamentals"], "position_size": pos_size,
+                "rs_rank": rs_rank,
+            })
+
+        elif action == "WATCH":
+            rsi = d["analysis"].get("rsi")
+            if rsi is not None and rsi < 47:  # only close-to-trigger watches
+                watch_signals.append({
+                    "symbol": symbol, "signal": signal, "analysis": d["analysis"],
+                    "rs_rank": rs_rank,
+                })
+
+        # Wheel check — non-ETF stocks only
+        is_etf = d["fundamentals"].get("is_etf", True) if d["fundamentals"] else True
+        if not is_etf:
+            price = d["analysis"]["price"]
+            strike = round(price * 0.93, 0)
+            collateral_sgd = round(strike * 100 / sgd_to_usd, 0)
+            feasible = collateral_sgd <= PORTFOLIO_SIZE_SGD * 0.8
+            opt_signal = _options_signal(d["analysis"], regime, feasible)
+            if opt_signal["action"] == "SELL PUT":
+                wheel_signals.append({
+                    "symbol": symbol, "strike": strike,
+                    "collateral_sgd": collateral_sgd,
+                    "options_signal": opt_signal,
+                    "analysis": d["analysis"],
+                    "fundamentals": d["fundamentals"],
+                })
+
+    priority_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    buy_signals.sort(key=lambda x: (
+        priority_order.get(x["signal"]["priority"], 3),
+        -(x["rs_rank"] or 0),
+    ))
+    wheel_signals.sort(key=lambda x: priority_order.get(x["options_signal"]["priority"], 3))
+
+    return {
+        "regime": regime,
+        "buy_signals": buy_signals[:7],
+        "watch_signals": watch_signals[:5],
+        "wheel_signals": wheel_signals[:5],
+        "total_scanned": len(stock_data),
+    }
+
+
 async def send_morning_briefing():
     loop = asyncio.get_event_loop()
     SGT = ZoneInfo("Asia/Singapore")
@@ -524,6 +635,11 @@ async def send_morning_briefing():
         watch_signals=watch_signals,
     )
     telegram_bot.send(msg)
+
+    # Run full screener scan and send separately so it doesn't get cut off
+    scan = await run_screener_scan()
+    scan_msg = telegram_bot.format_scan_results(scan)
+    telegram_bot.send(scan_msg)
 
 
 async def morning_briefing_task():

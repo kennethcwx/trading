@@ -281,6 +281,74 @@ def format_share_card(
     return ""
 
 
+def format_scan_results(results: dict) -> str:
+    regime     = results["regime"]
+    buys       = results["buy_signals"]
+    watches    = results["watch_signals"]
+    wheels     = results["wheel_signals"]
+    total      = results.get("total_scanned", 0)
+    bullish    = regime.get("regime_ok", False)
+    vix        = regime.get("vix", 0)
+
+    lines = [
+        f"🔍 <b>Market Scan — {total} stocks</b>",
+        f"<code>Regime {'BULLISH ▲' if bullish else 'BEARISH ▼'}   VIX {vix:.1f}</code>",
+        "",
+    ]
+
+    # ── BUY setups ────────────────────────────────────────────────────────────
+    if buys:
+        lines.append(f"🟢 <b>BUY Setups ({len(buys)})</b>")
+        for b in buys:
+            a    = b["analysis"]
+            fund = b["fundamentals"]
+            ps   = b["position_size"]
+            grade = (fund.get("grade") or "ETF") if fund and not fund.get("is_etf") else "ETF"
+            reason = b["signal"]["reasons"][0]
+            rs_str = f"  RS {b['rs_rank']}th" if b.get("rs_rank") is not None else ""
+            size_str = (
+                f"\n  <code>Size  {ps['shares']:.2f} sh  S${ps['position_value_sgd']:.0f}</code>"
+                if ps else ""
+            )
+            lines.append(
+                f"\n<b>{b['symbol']}</b>  [{grade}]{rs_str}\n"
+                f"  {reason}\n"
+                f"  <code>Entry ~${a['price']:.2f}  Stop ${a['stop_loss']:.2f}  "
+                f"Target ${a['profit_target']:.2f}</code>"
+                f"{size_str}"
+            )
+    else:
+        lines.append("🟢 <b>BUY Setups</b>  none — market may be extended")
+
+    # ── Close to entry ────────────────────────────────────────────────────────
+    if watches:
+        lines += ["", f"👀 <b>Close to Entry ({len(watches)})</b>"]
+        for w in watches:
+            rsi = w["analysis"].get("rsi")
+            suggested = w["signal"]["suggested_action"]
+            lines.append(f"• <b>{w['symbol']}</b>  RSI {rsi:.0f}  — {suggested}")
+
+    # ── Wheel opportunities ───────────────────────────────────────────────────
+    if wheels:
+        lines += ["", f"🎡 <b>Wheel — Sell Put ({len(wheels)})</b>"]
+        for w in wheels:
+            a     = w["analysis"]
+            fund  = w["fundamentals"]
+            grade = (fund.get("grade") or "?") if fund and not fund.get("is_etf") else "?"
+            rsi   = a.get("rsi")
+            lines.append(
+                f"• <b>{w['symbol']}</b>  [{grade}]  RSI {rsi:.0f}  "
+                f"Strike ${w['strike']}  Collateral S${w['collateral_sgd']:,.0f}\n"
+                f"  {w['options_signal']['reason']}"
+            )
+
+    if not buys and not watches and not wheels:
+        lines += ["", "Nothing actionable right now. Check back after the next move."]
+
+    lines += ["", "<i>Verify IVR &gt; 30 before any options trade. Not financial advice.</i>"]
+    return "\n".join(lines)
+
+
 def format_morning_briefing(
     date_str: str,
     open_time_et: str,
@@ -355,6 +423,7 @@ def set_bot_commands() -> bool:
     if not TOKEN:
         return False
     commands = [
+        {"command": "scan",         "description": "Scan 70 stocks for BUY setups + wheel opportunities"},
         {"command": "briefing",    "description": "Send today's morning briefing now"},
         {"command": "signal",      "description": "Signal for any ticker — /signal AAPL"},
         {"command": "share",       "description": "Shareable summary for friends — /share AAPL"},
