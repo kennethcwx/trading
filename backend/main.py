@@ -611,13 +611,44 @@ async def send_morning_briefing():
         })
 
     actionable_signals, watch_signals = [], []
+
+    # Pass 1: fetch all watchlist data concurrently per symbol
+    briefing_data = []
     for symbol in db.get_watchlist():
         analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
         if not analysis:
             continue
-        fundamentals = await loop.run_in_executor(None, get_fundamentals, symbol)
-        rel_strength = await loop.run_in_executor(None, get_relative_strength, symbol)
-        signal = generate_signal(analysis, None, regime, fundamentals, rel_strength)
+        fundamentals, rel_strength, sector_status = await asyncio.gather(
+            loop.run_in_executor(None, get_fundamentals, symbol),
+            loop.run_in_executor(None, get_relative_strength, symbol),
+            loop.run_in_executor(None, get_sector_etf_status, symbol),
+        )
+        briefing_data.append({
+            "symbol": symbol, "analysis": analysis,
+            "fundamentals": fundamentals, "rel_strength": rel_strength,
+            "sector_status": sector_status,
+        })
+
+    # Compute RS percentile ranks within watchlist (consistent with /api/signals)
+    rs_entries = [
+        (d["symbol"], d["rel_strength"].get("rs_3m"))
+        for d in briefing_data
+        if d["rel_strength"] and d["rel_strength"].get("rs_3m") is not None
+    ]
+    if len(rs_entries) > 1:
+        sorted_rs = sorted(rs_entries, key=lambda x: x[1])
+        n = len(sorted_rs)
+        rs_rank_map = {sym: round((i / (n - 1)) * 100) for i, (sym, _) in enumerate(sorted_rs)}
+    else:
+        rs_rank_map = {}
+
+    # Pass 2: generate signals with RS rank + sector confirmation
+    for d in briefing_data:
+        symbol = d["symbol"]
+        rs_rank = rs_rank_map.get(symbol)
+        sector_ok = d["sector_status"].get("above_200sma") if d["sector_status"] else None
+        signal = generate_signal(d["analysis"], None, regime, d["fundamentals"], d["rel_strength"],
+                                 rs_rank=rs_rank, sector_ok=sector_ok)
         action = signal["action"]
         reason = signal["reasons"][0] if signal["reasons"] else signal["suggested_action"]
         if action in ACTIONABLE:
