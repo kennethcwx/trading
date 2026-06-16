@@ -69,6 +69,7 @@ def format_signal(
     stop = analysis.get("stop_loss", 0)
     target = analysis.get("profit_target", 0)
     reason = signal["reasons"][0] if signal["reasons"] else ""
+    is_crypto = position_size is not None and position_size.get("risk_sgd") is None
 
     HEADER = {
         "BUY":       f"🟢 <b>BUY — {symbol}</b>",
@@ -89,23 +90,31 @@ def format_signal(
 
         stop_pct = _pct(stop, price)
         target_pct = _pct(target, price)
+        risk_line = (
+            f"Risk     S${position_size['risk_sgd']:.0f}\n"
+            if position_size.get("risk_sgd") is not None
+            else ""
+        )
 
         lines += [
             fund_line,
             "",
             "<code>"
             f"Price    ${price:.2f}\n"
-            f"Shares   {position_size['shares']:.3f}  (S${position_size['position_value_sgd']:.0f})\n"
+            f"Shares   {position_size['shares']:.4f}  (S${position_size['position_value_sgd']:.0f})\n"
             f"Stop     ${stop:.2f}  ({stop_pct})\n"
             f"Target   ${target:.2f}  ({target_pct})\n"
-            f"Risk     S${position_size['risk_sgd']:.0f}\n"
+            f"{risk_line}"
             f"RSI      {_rsi_label(rsi)}\n"
             f"Trend    {_trend(above_200)}"
             "</code>",
         ]
         if position_size.get("note"):
             lines.append(f"\n<i>{position_size['note']}</i>")
-        lines.append("\n⚡ Execute at market open · Mon–Fri 9:30 AM ET")
+        if is_crypto:
+            lines.append("\n⚡ Crypto — enter when ready (24/7 market)")
+        else:
+            lines.append("\n⚡ Execute at market open · Mon–Fri 9:30 AM ET")
 
     elif action == "SELL":
         lines += [
@@ -281,6 +290,58 @@ def format_share_card(
     return ""
 
 
+def format_crypto_digest(rows: list[dict], sgd_to_usd: float = 0.74) -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    time_str = datetime.now(ZoneInfo("Asia/Singapore")).strftime("%H:%M SGT")
+
+    ACTION_ICON = {
+        "BUY": "🟢", "SELL": "🔴", "SELL_HALF": "🟠", "REVIEW": "🟡",
+        "HOLD": "⚪", "WATCH": "👀", "SKIP": "⏭",
+    }
+
+    lines = [f"🪙 <b>Crypto Pulse — {time_str}</b>", ""]
+
+    table, buy_rows = [], []
+    for r in rows:
+        coin   = r["symbol"].replace("-USD", "")
+        action = r["action"]
+        price  = r["analysis"]["price"]
+        rsi    = r["analysis"].get("rsi") or 0
+        pos    = r["position"]
+        icon   = ACTION_ICON.get(action, "⚪")
+
+        if pos:
+            pnl = ((price - pos["avg_cost"]) / pos["avg_cost"]) * 100
+            sign = "+" if pnl >= 0 else ""
+            table.append(f"{icon} {coin:<4} {action:<9} RSI {rsi:>3.0f}  ${price:>10,.2f}  {sign}{pnl:.1f}%")
+        else:
+            table.append(f"{icon} {coin:<4} {action:<9} RSI {rsi:>3.0f}  ${price:>10,.2f}")
+            if action == "BUY":
+                buy_rows.append(r)
+
+    lines.append("<code>" + "\n".join(table) + "</code>")
+
+    for r in buy_rows:
+        a      = r["analysis"]
+        ps     = r["pos_size"]
+        stop   = a["stop_loss"]
+        target = a["profit_target"]
+        price  = a["price"]
+        reason = r["signal"]["reasons"][0] if r["signal"]["reasons"] else ""
+        lines += [
+            "",
+            f"💡 <b>Buy {r['symbol']}</b> — {reason}",
+            "<code>"
+            f"Entry  ${price:.2f}  Stop ${stop:.2f} ({_pct(stop, price)})  Target ${target:.2f} ({_pct(target, price)})"
+            + (f"\nSize   {ps['shares']:.4f}  (S${ps['position_value_sgd']:.0f} ≈ ${ps['position_value_usd']:.0f})" if ps else "")
+            + "</code>",
+        ]
+
+    lines += ["", "<i>Not financial advice · crypto is 24/7 — enter when ready</i>"]
+    return "\n".join(lines)
+
+
 def format_scan_results(results: dict) -> str:
     regime     = results["regime"]
     buys       = results["buy_signals"]
@@ -424,6 +485,7 @@ def set_bot_commands() -> bool:
         return False
     commands = [
         {"command": "scan",         "description": "Scan 70 stocks for BUY setups + wheel opportunities"},
+        {"command": "crypto",      "description": "Current signal for BTC, ETH, SOL"},
         {"command": "briefing",    "description": "Send today's morning briefing now"},
         {"command": "signal",      "description": "Signal for any ticker — /signal AAPL"},
         {"command": "share",       "description": "Shareable summary for friends — /share AAPL"},

@@ -94,7 +94,7 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         label = "Mean-reversion" if mean_rev else "Momentum breakout"
 
         # ── Filter 1: RS rank — only top 25% within the current symbol set ──
-        if rs_rank is not None and rs_rank < 75:
+        if rs_rank is not None and rs_rank < 50:
             return _signal("WATCH", "LOW",
                            [f"{label} triggered but RS rank {rs_rank}th percentile — needs top 25%"],
                            f"Wait for relative strength to improve · currently ranked {rs_rank}th percentile vs watchlist")

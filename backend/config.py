@@ -1,6 +1,10 @@
 PORTFOLIO_SIZE_SGD = 5000
 PORTFOLIO_CURRENCY = "SGD"
 
+# Crypto swing trades — fixed position size, 24/7 monitoring
+CRYPTO_WATCHLIST = ["BTC-USD", "ETH-USD", "SOL-USD"]
+CRYPTO_POSITION_SGD = 350   # ~$260 USD per trade
+
 # Core watchlist — swing trades, technical signals apply
 WATCHLIST = ["AAPL", "MSFT", "NVDA", "BAC", "AMD", "CAT", "ABBV", "AMZN"]
 
@@ -73,6 +77,11 @@ MIN_IVR = 30
 TARGET_DELTA = 0.30
 WHEEL_DTE_MIN = 30
 WHEEL_DTE_MAX = 45
+
+# Bull put spreads — separate options sub-account (S$2k / ~$1,480 USD), SPY/QQQ only
+SPREAD_UNIVERSE = ["SPY", "QQQ"]
+SPREAD_WIDTH = 5.0           # $ between short and long put strikes
+SPREAD_ACCOUNT_SGD = 2000    # smaller sub-account dedicated to options income
 
 # Market regime
 VIX_CAUTION = 25

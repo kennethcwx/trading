@@ -5,7 +5,8 @@ import yfinance as yf
 from datetime import datetime
 from config import (
     RSI_ENTRY, RSI_EXIT, SMA_LONG, SMA_SHORT, MOMENTUM_DAYS,
-    STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO, VIX_CAUTION, VIX_DEFENSIVE
+    STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO, VIX_CAUTION, VIX_DEFENSIVE,
+    SPREAD_WIDTH
 )
 
 SECTOR_ETF_MAP = {
@@ -377,6 +378,88 @@ def get_options_premium(symbol: str, target_strike: float, option_type: str = "p
             "mid":           round(mid, 2),
             "total_contract": round(mid * 100, 2),
             "iv_pct":        round(iv * 100, 1) if iv else None,
+        }
+    except Exception:
+        pass
+
+    with _cache_lock:
+        _cache[key] = {"data": result, "ts": time.time()}
+    return result
+
+
+def get_bull_put_spread(symbol: str, price: float, width: float = SPREAD_WIDTH) -> dict | None:
+    """Fetch a 30-45 DTE bull put credit spread on an index ETF: sell a put ~5% out of
+    the money, buy a put `width` dollars further out to cap risk. Returns net credit,
+    max profit/loss, breakeven and ROI on risk. Cached 10 min."""
+    import datetime as _dt
+    short_target = round(price * 0.95 / 5) * 5   # nearest $5 strike, ~5% OTM
+    key = f"bull_put_spread:{symbol}:{short_target}:{width}"
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry and time.time() - entry["ts"] < 600:
+            return entry["data"]
+
+    result = None
+    try:
+        ticker = yf.Ticker(symbol)
+        expirations = ticker.options
+        if not expirations:
+            raise ValueError("no expirations")
+
+        today = _dt.date.today()
+        best_expiry, best_dte = None, None
+        for exp_str in expirations:
+            dte = (_dt.date.fromisoformat(exp_str) - today).days
+            if 25 <= dte <= 55:
+                if best_dte is None or abs(dte - 38) < abs(best_dte - 38):
+                    best_expiry, best_dte = exp_str, dte
+        if not best_expiry:
+            raise ValueError("no suitable expiry")
+
+        puts = ticker.option_chain(best_expiry).puts
+        if puts.empty:
+            raise ValueError("empty chain")
+        puts = puts.copy()
+
+        puts["short_diff"] = (puts["strike"] - short_target).abs()
+        short_row = puts.loc[puts["short_diff"].idxmin()]
+        short_strike = float(short_row["strike"])
+
+        long_target = short_strike - width
+        puts["long_diff"] = (puts["strike"] - long_target).abs()
+        long_candidates = puts[puts["strike"] < short_strike]
+        if long_candidates.empty:
+            raise ValueError("no strike below short leg")
+        long_row = long_candidates.loc[long_candidates["long_diff"].idxmin()]
+        long_strike = float(long_row["strike"])
+
+        def _mid(row) -> float:
+            bid = float(row.get("bid", 0) or 0)
+            ask = float(row.get("ask", 0) or 0)
+            last = float(row.get("lastPrice", 0) or 0)
+            return round((bid + ask) / 2, 2) if bid > 0 and ask > 0 else last
+
+        short_mid = _mid(short_row)
+        long_mid = _mid(long_row)
+        net_credit  = round(short_mid - long_mid, 2)
+        actual_width = round(short_strike - long_strike, 2)
+        max_profit  = round(net_credit * 100, 2)
+        max_loss    = round((actual_width - net_credit) * 100, 2)
+        breakeven   = round(short_strike - net_credit, 2)
+        iv          = float(short_row.get("impliedVolatility", 0) or 0)
+
+        result = {
+            "expiry":       best_expiry,
+            "dte":          best_dte,
+            "short_strike": short_strike,
+            "long_strike":  long_strike,
+            "width":        actual_width,
+            "net_credit":   net_credit,
+            "max_profit":   max_profit,
+            "max_loss":     max_loss,
+            "breakeven":    breakeven,
+            "roi_pct":      round((max_profit / max_loss) * 100, 1) if max_loss > 0 else None,
+            "short_iv_pct": round(iv * 100, 1) if iv else None,
         }
     except Exception:
         pass

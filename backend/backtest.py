@@ -98,12 +98,16 @@ def _prepare(symbol: str) -> pd.DataFrame | None:
     df["don_upper"] = h.shift(1).rolling(MOMENTUM_DAYS).max()  # 20-day high
     df["don_lower"] = l.shift(1).rolling(MOMENTUM_DAYS).min()  # 20-day low
 
+    # Structural swing low — lowest low ~7-46 days back, excluding the most
+    # recent week so the very pullback that triggers entry doesn't define its own stop
+    df["swing_low"] = l.shift(6).rolling(40).min()
+
     # SMA crossover: 1 on the bar where sma20 crosses above sma50
     prev_above = df["sma20"].shift(1) > df["sma50"].shift(1)
     curr_above = df["sma20"] > df["sma50"]
     df["sma_cross_up"] = (~prev_above) & curr_above
 
-    return df.dropna(subset=["sma200", "atr", "don_upper", "don_lower"])
+    return df.dropna(subset=["sma200", "atr", "don_upper", "don_lower", "swing_low"])
 
 
 # ── Signal variants ───────────────────────────────────────────────────────────
@@ -200,11 +204,40 @@ def _entry_combined(row) -> tuple[str | None, float]:
     return None, 0.0
 
 
+def _entry_swing_low(row) -> tuple[str | None, float]:
+    """Same entries as BASELINE but stop placed below the prior structural swing low
+    (40-day low, excluding the most recent week) instead of a pure ATR multiple —
+    aims to give the trade room through the pullback that triggered entry, rather
+    than getting stopped out by the same noise that created the setup."""
+    price = float(row["Close"])
+    if price <= row["sma200"]:
+        return None, 0.0
+    rsi_val    = float(row["rsi"])
+    atr_val    = float(row["atr"])
+    swing_low  = float(row["swing_low"])
+    raw_stop   = swing_low - 0.5 * atr_val
+    stop       = max(raw_stop, price * (1 - STOP_MAX_PCT))   # cap max loss at 8%
+    stop       = min(stop, price * (1 - 0.02))                # ensure at least 2% breathing room
+
+    mean_rev = rsi_val < RSI_ENTRY
+    momentum = (
+        price >= row["don_upper"]
+        and float(row["vol_ratio"]) >= VOLUME_MULTIPLIER
+        and RSI_ENTRY < rsi_val < RSI_EXIT
+    )
+    if mean_rev:
+        return "MEAN_REV", stop
+    if momentum:
+        return "MOMENTUM", stop
+    return None, 0.0
+
+
 VARIANTS: dict[str, callable] = {
     "BASELINE":       _entry_baseline,
     "SMA_CROSS":      _entry_sma_cross,
     "DONCHIAN_STOP":  _entry_donchian_stop,
     "COMBINED":       _entry_combined,
+    "SWING_LOW":      _entry_swing_low,
 }
 
 
