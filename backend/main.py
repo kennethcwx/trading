@@ -16,18 +16,57 @@ from pydantic import BaseModel
 import ibkr
 import db
 import telegram_bot
-from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, invalidate_cache
+from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE
+from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD
 
 logging.basicConfig(level=logging.INFO)
 
 ACTIONABLE = {"BUY", "SELL", "SELL_HALF", "REVIEW"}
 _last_signals: dict[str, str] = {}
+_last_crypto_signals: dict[str, str] = {}
 _price_alerts: dict[int, dict] = {}
 _alert_id_gen = itertools.count(1)
 
 ET = ZoneInfo("America/New_York")
+
+
+async def _fetch_batch(symbols: list[str], max_concurrent: int = 15) -> list[dict]:
+    """Fetch analysis, fundamentals, RS, and sector data for all symbols concurrently."""
+    loop = asyncio.get_event_loop()
+    sem = asyncio.Semaphore(max_concurrent)
+
+    async def _one(symbol: str) -> dict | None:
+        async with sem:
+            analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+            if not analysis:
+                return None
+            fundamentals, rel_strength, sector_status = await asyncio.gather(
+                loop.run_in_executor(None, get_fundamentals, symbol),
+                loop.run_in_executor(None, get_relative_strength, symbol),
+                loop.run_in_executor(None, get_sector_etf_status, symbol),
+            )
+            return {
+                "symbol": symbol, "analysis": analysis,
+                "fundamentals": fundamentals, "rel_strength": rel_strength,
+                "sector_status": sector_status,
+            }
+
+    results = await asyncio.gather(*[_one(s) for s in symbols])
+    return [r for r in results if r is not None]
+
+
+def _compute_rs_ranks(stock_data: list[dict]) -> dict[str, int]:
+    rs_entries = [
+        (d["symbol"], d["rel_strength"].get("rs_3m"))
+        for d in stock_data
+        if d["rel_strength"] and d["rel_strength"].get("rs_3m") is not None
+    ]
+    if len(rs_entries) <= 1:
+        return {}
+    sorted_rs = sorted(rs_entries, key=lambda x: x[1])
+    n = len(sorted_rs)
+    return {sym: round((i / (n - 1)) * 100) for i, (sym, _) in enumerate(sorted_rs)}
 
 
 def _market_is_open() -> bool:
@@ -78,35 +117,8 @@ async def signal_watcher():
             watchlist = db.get_watchlist()
             all_symbols = list(dict.fromkeys(watchlist + list(position_map.keys())))
 
-            # Pass 1: fetch all data concurrently per symbol
-            stock_data = []
-            for symbol in all_symbols:
-                analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
-                if not analysis:
-                    continue
-                fundamentals, rel_strength, sector_status = await asyncio.gather(
-                    loop.run_in_executor(None, get_fundamentals, symbol),
-                    loop.run_in_executor(None, get_relative_strength, symbol),
-                    loop.run_in_executor(None, get_sector_etf_status, symbol),
-                )
-                stock_data.append({
-                    "symbol": symbol, "analysis": analysis,
-                    "fundamentals": fundamentals, "rel_strength": rel_strength,
-                    "sector_status": sector_status,
-                })
-
-            # Compute RS ranks within watchlist (same logic as signals endpoint)
-            rs_entries = [
-                (d["symbol"], d["rel_strength"].get("rs_3m"))
-                for d in stock_data
-                if d["rel_strength"] and d["rel_strength"].get("rs_3m") is not None
-            ]
-            if len(rs_entries) > 1:
-                sorted_rs = sorted(rs_entries, key=lambda x: x[1])
-                n = len(sorted_rs)
-                rs_rank_map = {sym: round((i / (n - 1)) * 100) for i, (sym, _) in enumerate(sorted_rs)}
-            else:
-                rs_rank_map = {}
+            stock_data = await _fetch_batch(all_symbols)
+            rs_rank_map = _compute_rs_ranks(stock_data)
 
             # Pass 2: generate signals with RS rank + sector confirmation
             for d in stock_data:
@@ -175,6 +187,106 @@ async def signal_watcher():
         await asyncio.sleep(5 * 60)  # check every 5 minutes
 
 
+async def _build_crypto_snapshot(regime: dict, sgd_to_usd: float) -> list[dict]:
+    """Fetch signals for all crypto watchlist coins + any open crypto positions."""
+    open_rows = db.fetch(
+        "SELECT symbol, shares, entry_price, entry_date FROM trades WHERE exit_price IS NULL"
+    )
+    crypto_positions = {
+        row["symbol"]: {
+            "avg_cost": row["entry_price"],
+            "shares": row["shares"],
+            "entry_date": row.get("entry_date"),
+        }
+        for row in open_rows if row["symbol"] in CRYPTO_WATCHLIST
+    }
+
+    all_crypto = list(dict.fromkeys(CRYPTO_WATCHLIST + list(crypto_positions.keys())))
+    stock_data = await _fetch_batch(all_crypto)
+
+    rows = []
+    for d in stock_data:
+        symbol = d["symbol"]
+        position = crypto_positions.get(symbol)
+        signal = generate_signal(
+            d["analysis"], position, regime, d["fundamentals"], d["rel_strength"],
+            rs_rank=None, sector_ok=None,
+        )
+        action = signal["action"]
+        pos_size = None
+        if action == "BUY" and not position:
+            price = d["analysis"]["price"]
+            qty = round(CRYPTO_POSITION_SGD * sgd_to_usd / price, 6)
+            pos_size = {
+                "shares": qty,
+                "position_value_sgd": CRYPTO_POSITION_SGD,
+                "position_value_usd": round(CRYPTO_POSITION_SGD * sgd_to_usd, 2),
+                "risk_sgd": None,
+                "note": f"Fixed S${CRYPTO_POSITION_SGD} allocation",
+            }
+        rows.append({
+            "symbol": symbol,
+            "action": action,
+            "signal": signal,
+            "analysis": d["analysis"],
+            "fundamentals": d["fundamentals"],
+            "position": position,
+            "pos_size": pos_size,
+        })
+    return rows
+
+
+async def crypto_watcher():
+    """4-hour digest for all crypto coins. Immediate alert on SELL/stop-loss for held positions."""
+    await asyncio.sleep(45)
+    loop = asyncio.get_event_loop()
+    cycle = 0
+    DIGEST_EVERY = 8  # 8 × 30 min = 4 hours
+
+    while True:
+        try:
+            regime = await loop.run_in_executor(None, get_market_regime)
+            sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+            rows = await _build_crypto_snapshot(regime, sgd_to_usd)
+
+            for r in rows:
+                symbol = r["symbol"]
+                action = r["action"]
+                prev   = _last_crypto_signals.get(symbol)
+
+                if action != prev:
+                    # Immediate alert: new BUY signal
+                    if action == "BUY" and not r["position"]:
+                        msg = telegram_bot.format_signal(
+                            symbol, r["signal"], r["analysis"], r["pos_size"], r["fundamentals"]
+                        )
+                        telegram_bot.send(msg)
+                        stop   = r["analysis"]["stop_loss"]
+                        target = r["analysis"]["profit_target"]
+                        _price_alerts[next(_alert_id_gen)] = {"symbol": symbol, "target": stop,   "direction": "below"}
+                        _price_alerts[next(_alert_id_gen)] = {"symbol": symbol, "target": target, "direction": "above"}
+
+                    # Immediate alert: exit signal on a held position — don't wait for digest
+                    elif r["position"] and action in ("SELL", "SELL_HALF", "REVIEW"):
+                        msg = telegram_bot.format_signal(
+                            symbol, r["signal"], r["analysis"], None, r["fundamentals"]
+                        )
+                        telegram_bot.send(msg)
+
+                _last_crypto_signals[symbol] = action
+
+            # Every 4 hours: send full digest
+            cycle += 1
+            if cycle >= DIGEST_EVERY:
+                cycle = 0
+                telegram_bot.send(telegram_bot.format_crypto_digest(rows, sgd_to_usd))
+
+        except Exception as e:
+            logging.warning(f"Crypto watcher error: {e}")
+
+        await asyncio.sleep(30 * 60)
+
+
 class WatchlistUpdate(BaseModel):
     symbols: list[str]
 
@@ -223,6 +335,7 @@ async def handle_telegram_command(text: str):
         telegram_bot.send(
             "<b>Available commands</b>\n\n"
             "/scan — scan 70 stocks for BUY setups + wheel opportunities\n"
+            "/crypto — current signal for BTC, ETH, SOL\n"
             "/signal AAPL — current signal for any ticker\n"
             "/share AAPL — shareable summary to send to friends\n"
             "/positions — your open trades with live P&L\n"
@@ -235,6 +348,18 @@ async def handle_telegram_command(text: str):
             "/remove AAPL — remove ticker from watchlist\n"
             "/status — market regime overview"
         )
+
+    elif cmd == "/crypto":
+        telegram_bot.send("⏳ Fetching crypto signals…")
+        try:
+            loop = asyncio.get_event_loop()
+            regime = await loop.run_in_executor(None, get_market_regime)
+            sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+            rows = await _build_crypto_snapshot(regime, sgd_to_usd)
+            telegram_bot.send(telegram_bot.format_crypto_digest(rows, sgd_to_usd))
+        except Exception as e:
+            logging.warning(f"/crypto error: {e}")
+            telegram_bot.send(f"❌ Crypto fetch failed: {e}")
 
     elif cmd == "/briefing":
         telegram_bot.send("⏳ Generating briefing…")
@@ -490,35 +615,8 @@ async def run_screener_scan() -> dict:
     sgd_to_usd = regime.get("sgd_to_usd", 0.74)
     size_mult = regime.get("new_position_size_multiplier", 1.0)
 
-    # Pass 1: fetch all data concurrently per symbol
-    stock_data = []
-    for symbol in SCREENER_UNIVERSE:
-        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
-        if not analysis:
-            continue
-        fundamentals, rel_strength, sector_status = await asyncio.gather(
-            loop.run_in_executor(None, get_fundamentals, symbol),
-            loop.run_in_executor(None, get_relative_strength, symbol),
-            loop.run_in_executor(None, get_sector_etf_status, symbol),
-        )
-        stock_data.append({
-            "symbol": symbol, "analysis": analysis,
-            "fundamentals": fundamentals, "rel_strength": rel_strength,
-            "sector_status": sector_status,
-        })
-
-    # RS ranks
-    rs_entries = [
-        (d["symbol"], d["rel_strength"].get("rs_3m"))
-        for d in stock_data
-        if d["rel_strength"] and d["rel_strength"].get("rs_3m") is not None
-    ]
-    if len(rs_entries) > 1:
-        sorted_rs = sorted(rs_entries, key=lambda x: x[1])
-        n = len(sorted_rs)
-        rs_rank_map = {sym: round((i / (n - 1)) * 100) for i, (sym, _) in enumerate(sorted_rs)}
-    else:
-        rs_rank_map = {}
+    stock_data = await _fetch_batch(SCREENER_UNIVERSE)
+    rs_rank_map = _compute_rs_ranks(stock_data)
 
     buy_signals, watch_signals, wheel_signals = [], [], []
 
@@ -612,35 +710,8 @@ async def send_morning_briefing():
 
     actionable_signals, watch_signals = [], []
 
-    # Pass 1: fetch all watchlist data concurrently per symbol
-    briefing_data = []
-    for symbol in db.get_watchlist():
-        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
-        if not analysis:
-            continue
-        fundamentals, rel_strength, sector_status = await asyncio.gather(
-            loop.run_in_executor(None, get_fundamentals, symbol),
-            loop.run_in_executor(None, get_relative_strength, symbol),
-            loop.run_in_executor(None, get_sector_etf_status, symbol),
-        )
-        briefing_data.append({
-            "symbol": symbol, "analysis": analysis,
-            "fundamentals": fundamentals, "rel_strength": rel_strength,
-            "sector_status": sector_status,
-        })
-
-    # Compute RS percentile ranks within watchlist (consistent with /api/signals)
-    rs_entries = [
-        (d["symbol"], d["rel_strength"].get("rs_3m"))
-        for d in briefing_data
-        if d["rel_strength"] and d["rel_strength"].get("rs_3m") is not None
-    ]
-    if len(rs_entries) > 1:
-        sorted_rs = sorted(rs_entries, key=lambda x: x[1])
-        n = len(sorted_rs)
-        rs_rank_map = {sym: round((i / (n - 1)) * 100) for i, (sym, _) in enumerate(sorted_rs)}
-    else:
-        rs_rank_map = {}
+    briefing_data = await _fetch_batch(db.get_watchlist())
+    rs_rank_map = _compute_rs_ranks(briefing_data)
 
     # Pass 2: generate signals with RS rank + sector confirmation
     for d in briefing_data:
@@ -722,12 +793,14 @@ async def lifespan(app: FastAPI):
     db.init_db()
     ibkr.connect_background(paper=True)
     watcher = asyncio.create_task(signal_watcher())
+    crypto = asyncio.create_task(crypto_watcher())
     listener = asyncio.create_task(telegram_command_listener())
     briefing = asyncio.create_task(morning_briefing_task())
     telegram_bot.set_bot_commands()
     telegram_bot.send(telegram_bot.format_startup(db.get_watchlist()))
     yield
     watcher.cancel()
+    crypto.cancel()
     listener.cancel()
     briefing.cancel()
 
@@ -824,50 +897,26 @@ async def signals(group: str = "core"):
         base_symbols = SCREENER_UNIVERSE
     elif group == "long_term":
         base_symbols = LONGTERM_WATCHLIST
+    elif group == "crypto":
+        base_symbols = CRYPTO_WATCHLIST
     else:
         base_symbols = db.get_watchlist()
 
     all_symbols = list(dict.fromkeys(base_symbols + list(position_map.keys())))
 
-    # Pass 1: fetch all data — fundamentals/RS/sector run concurrently per symbol
-    stock_data = []
-    for symbol in all_symbols:
-        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
-        if not analysis:
-            continue
-        fundamentals, rel_strength, sector_status = await asyncio.gather(
-            loop.run_in_executor(None, get_fundamentals, symbol),
-            loop.run_in_executor(None, get_relative_strength, symbol),
-            loop.run_in_executor(None, get_sector_etf_status, symbol),
-        )
-        stock_data.append({
-            "symbol": symbol,
-            "analysis": analysis,
-            "fundamentals": fundamentals,
-            "rel_strength": rel_strength,
-            "sector_status": sector_status,
-        })
-
-    # Compute RS percentile ranks within this symbol set
-    rs_entries = [
-        (d["symbol"], d["rel_strength"].get("rs_3m"))
-        for d in stock_data
-        if d["rel_strength"] and d["rel_strength"].get("rs_3m") is not None
-    ]
-    if len(rs_entries) > 1:
-        sorted_rs = sorted(rs_entries, key=lambda x: x[1])
-        n = len(sorted_rs)
-        rs_rank_map = {sym: round((i / (n - 1)) * 100) for i, (sym, _) in enumerate(sorted_rs)}
-    else:
-        rs_rank_map = {}
+    stock_data = await _fetch_batch(all_symbols)
+    rs_rank_map = _compute_rs_ranks(stock_data)
 
     # Pass 2: generate signals with RS rank + sector confirmation
     results = []
     for d in stock_data:
         symbol = d["symbol"]
         position = position_map.get(symbol)
-        rs_rank = rs_rank_map.get(symbol)
-        sector_ok = d["sector_status"].get("above_200sma") if d["sector_status"] else None
+        # Crypto: skip RS rank and sector filters (no meaningful peer group / no sector ETF)
+        rs_rank = None if group == "crypto" else rs_rank_map.get(symbol)
+        sector_ok = None if group == "crypto" else (
+            d["sector_status"].get("above_200sma") if d["sector_status"] else None
+        )
 
         signal = generate_signal(
             d["analysis"], position, regime, d["fundamentals"], d["rel_strength"],
@@ -881,15 +930,26 @@ async def signals(group: str = "core"):
 
         pos_size = None
         if signal["action"] == "BUY":
-            # Long-term: fixed S$150 accumulation amount instead of full risk-based size
-            lt_size = 150 if group == "long_term" else None
-            pos_size = calculate_position_size(
-                lt_size or PORTFOLIO_SIZE_SGD,
-                d["analysis"]["price"],
-                d["analysis"]["stop_loss"],
-                sgd_to_usd,
-                size_mult,
-            )
+            if group == "crypto":
+                price = d["analysis"]["price"]
+                qty = round(CRYPTO_POSITION_SGD * sgd_to_usd / price, 6)
+                pos_size = {
+                    "shares": qty,
+                    "position_value_sgd": CRYPTO_POSITION_SGD,
+                    "position_value_usd": round(CRYPTO_POSITION_SGD * sgd_to_usd, 2),
+                    "risk_sgd": None,
+                    "note": f"Fixed S${CRYPTO_POSITION_SGD} allocation (fractional)",
+                }
+            else:
+                # Long-term: fixed S$150 accumulation; all others: risk-based
+                lt_size = 150 if group == "long_term" else None
+                pos_size = calculate_position_size(
+                    lt_size or PORTFOLIO_SIZE_SGD,
+                    d["analysis"]["price"],
+                    d["analysis"]["stop_loss"],
+                    sgd_to_usd,
+                    size_mult,
+                )
 
         results.append({
             "symbol": symbol,
@@ -918,6 +978,7 @@ async def signals(group: str = "core"):
         "signals": results,
         "regime": regime,
         "generated_at": datetime.now().isoformat(),
+        **({"total_scanned": len(stock_data)} if group == "screener" else {}),
     }
 
 
@@ -1093,6 +1154,102 @@ def _options_signal(analysis: dict, regime: dict, feasible: bool) -> dict:
         "action": "WATCH", "priority": "LOW",
         "reason": f"RSI {rsi:.0f} — overbought, wait for pullback before selling put" if rsi else "No entry signal",
         "suggested_action": "Wait for RSI < 60 then reassess",
+    }
+
+
+def _bull_put_spread_signal(analysis: dict, regime: dict) -> dict:
+    """Entry logic for bull put credit spreads on index ETFs (SPY/QQQ). These profit
+    from neutral-to-bullish drift, so the same uptrend + non-bearish-regime checks as
+    cash-secured puts apply, with overbought RSI flagged as pullback risk into expiry."""
+    rsi = analysis.get("rsi")
+    above_200 = analysis.get("above_200sma")
+    regime_ok = regime.get("regime_ok", True)
+    vix_status = regime.get("vix_status", "NORMAL")
+
+    if not regime_ok:
+        return {
+            "action": "AVOID", "priority": "HIGH",
+            "reason": "Market regime BEARISH — a fast move down can blow through both strikes",
+            "suggested_action": "Wait for SPY to reclaim its 200 SMA before opening new spreads",
+        }
+
+    if not above_200:
+        return {
+            "action": "AVOID", "priority": "HIGH",
+            "reason": "Below 200 SMA — downtrend risk, don't sell put spreads here",
+            "suggested_action": "Wait for price to recover above the 200-day average",
+        }
+
+    vix_note = " — elevated IV means a fatter credit" if vix_status != "NORMAL" else ""
+
+    if rsi is not None and rsi > 75:
+        return {
+            "action": "WATCH", "priority": "LOW",
+            "reason": f"RSI {rsi:.0f} — overbought, pullback risk before expiry",
+            "suggested_action": "Wait for RSI to cool below 70, then open the spread",
+        }
+
+    if rsi is not None and rsi < 50:
+        return {
+            "action": "OPEN SPREAD", "priority": "HIGH",
+            "reason": f"RSI {rsi:.0f} — pullback within an uptrend, strong premium-selling entry{vix_note}",
+            "suggested_action": "Sell the spread at 30–45 DTE; aim for credit ≈ 1/3 of the strike width",
+        }
+
+    return {
+        "action": "OPEN SPREAD", "priority": "MEDIUM",
+        "reason": f"RSI {rsi:.0f} — uptrend intact, acceptable entry conditions{vix_note}",
+        "suggested_action": "Sell the spread at 30–45 DTE; aim for credit ≈ 1/3 of the strike width",
+    }
+
+
+@app.get("/api/spread-opportunities")
+async def spread_opportunities():
+    """Bull put spread scanner for the dedicated options sub-account (S$2k / ~$1,480 USD).
+    Scans SPY/QQQ only — defined-risk credit spreads sized to fit a small account."""
+    loop = asyncio.get_event_loop()
+    regime = await loop.run_in_executor(None, get_market_regime)
+    sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+    account_usd = round(SPREAD_ACCOUNT_SGD * sgd_to_usd, 0)
+
+    opportunities = []
+    for symbol in SPREAD_UNIVERSE:
+        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+        if not analysis:
+            continue
+
+        price = analysis["price"]
+        signal = _bull_put_spread_signal(analysis, regime)
+        spread = await loop.run_in_executor(None, get_bull_put_spread, symbol, price, SPREAD_WIDTH)
+
+        fits_account = spread["max_loss"] <= account_usd * 0.5 if spread else None
+
+        opportunities.append({
+            "symbol": symbol,
+            "strategy": "Bull Put Spread",
+            "price": price,
+            "spread": spread,
+            "fits_account": fits_account,
+            "signal": signal,
+            "rsi": analysis.get("rsi"),
+            "above_200sma": analysis.get("above_200sma"),
+            "days_to_earnings": analysis.get("days_to_earnings"),
+        })
+
+    priority_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    action_order = {"OPEN SPREAD": 0, "WATCH": 1, "AVOID": 2}
+    opportunities.sort(key=lambda o: (
+        action_order.get(o["signal"]["action"], 3),
+        priority_order.get(o["signal"]["priority"], 3),
+    ))
+
+    return {
+        "opportunities": opportunities,
+        "regime": regime,
+        "account_size_sgd": SPREAD_ACCOUNT_SGD,
+        "account_size_usd": account_usd,
+        "spread_width": SPREAD_WIDTH,
+        "note": "Defined-risk credit spreads — max loss is capped at entry. Verify live bid/ask before opening; yfinance quotes can lag.",
     }
 
 
