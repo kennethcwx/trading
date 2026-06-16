@@ -786,6 +786,7 @@ async def telegram_command_listener():
                     await handle_telegram_command(text)
         except Exception as e:
             logging.warning(f"Telegram command listener error: {e}")
+            await asyncio.sleep(30)  # back off on error — prevents tight loop on 409 Conflict
 
 
 @asynccontextmanager
