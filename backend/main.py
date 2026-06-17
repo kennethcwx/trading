@@ -353,10 +353,13 @@ async def handle_telegram_command(text: str):
         telegram_bot.send("⏳ Fetching crypto signals…")
         try:
             loop = asyncio.get_event_loop()
-            regime = await loop.run_in_executor(None, get_market_regime)
+            regime = await asyncio.wait_for(loop.run_in_executor(None, get_market_regime), timeout=20)
             sgd_to_usd = regime.get("sgd_to_usd", 0.74)
-            rows = await _build_crypto_snapshot(regime, sgd_to_usd)
+            rows = await asyncio.wait_for(_build_crypto_snapshot(regime, sgd_to_usd), timeout=45)
             telegram_bot.send(telegram_bot.format_crypto_digest(rows, sgd_to_usd))
+        except asyncio.TimeoutError:
+            logging.warning("/crypto timed out fetching data")
+            telegram_bot.send("❌ Crypto fetch timed out — Yahoo Finance may be slow/rate-limited with the larger watchlist. Try again shortly.")
         except Exception as e:
             logging.warning(f"/crypto error: {e}")
             telegram_bot.send(f"❌ Crypto fetch failed: {e}")
