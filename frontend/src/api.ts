@@ -1,4 +1,4 @@
-import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, TradesResponse, WatchlistResponse, OptionsTradesResponse } from './types'
+import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, SpreadOpportunitiesResponse, TradesResponse, WatchlistResponse, OptionsTradesResponse } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? ''
 
@@ -17,6 +17,7 @@ export type SignalGroup = 'core' | 'long_term' | 'quantum' | 'covered_calls' | '
 export const fetchSignals = (group: SignalGroup = 'core') => get<SignalsResponse>(`/signals?group=${group}`)
 export const fetchPortfolio = () => get<PortfolioResponse>('/portfolio')
 export const fetchOptions = () => get<OptionsResponse>('/options-opportunities')
+export const fetchSpreads = () => get<SpreadOpportunitiesResponse>('/spread-opportunities')
 
 export async function postRefreshCache() {
   await apiFetch('/refresh-cache', { method: 'POST' })

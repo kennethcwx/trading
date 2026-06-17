@@ -100,6 +100,7 @@ export interface SignalsResponse {
   signals: SignalItem[]
   regime: MarketRegime
   generated_at: string
+  total_scanned?: number
 }
 
 export interface IBKRPosition {
@@ -164,6 +165,48 @@ export interface OptionsResponse {
   opportunities: OptionsOpportunity[]
   regime: MarketRegime
   portfolio_size_sgd: number
+  note: string
+}
+
+export interface SpreadSignal {
+  action: 'OPEN SPREAD' | 'WATCH' | 'AVOID'
+  priority: 'HIGH' | 'MEDIUM' | 'LOW'
+  reason: string
+  suggested_action: string
+}
+
+export interface BullPutSpread {
+  expiry: string
+  dte: number
+  short_strike: number
+  long_strike: number
+  width: number
+  net_credit: number
+  max_profit: number
+  max_loss: number
+  breakeven: number
+  roi_pct: number | null
+  short_iv_pct: number | null
+}
+
+export interface SpreadOpportunity {
+  symbol: string
+  strategy: string
+  price: number
+  spread: BullPutSpread | null
+  fits_account: boolean | null
+  signal: SpreadSignal
+  rsi: number | null
+  above_200sma: boolean | null
+  days_to_earnings: number | null
+}
+
+export interface SpreadOpportunitiesResponse {
+  opportunities: SpreadOpportunity[]
+  regime: MarketRegime
+  account_size_sgd: number
+  account_size_usd: number
+  spread_width: number
   note: string
 }
 

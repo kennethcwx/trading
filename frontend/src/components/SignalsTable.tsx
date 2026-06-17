@@ -196,6 +196,9 @@ const GROUP_META: Record<SignalGroup, { label: string; desc: string }> = {
 export function SignalsTable({ signals, group = 'core' }: { signals: SignalsResponse; group?: SignalGroup }) {
   const [filter, setFilter] = useState<FilterTab>('all')
   const meta = GROUP_META[group]
+  const desc = group === 'screener' && signals.total_scanned
+    ? meta.desc.replace(/^\d+ stocks scanned/, `${signals.total_scanned} stocks scanned`)
+    : meta.desc
 
   const sorted = [
     ...signals.signals.filter(s => ACTIONABLE.includes(s.signal.action)),
@@ -222,7 +225,7 @@ export function SignalsTable({ signals, group = 'core' }: { signals: SignalsResp
         style={{ borderColor: 'var(--border)' }}>
         <div>
           <h2 className="text-sm font-semibold text-white">{meta.label}</h2>
-          <p className="text-[11px] mt-0.5" style={{ color: '#555' }}>{meta.desc}</p>
+          <p className="text-[11px] mt-0.5" style={{ color: '#555' }}>{desc}</p>
         </div>
 
         {/* Filter tabs */}

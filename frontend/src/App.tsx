@@ -1,15 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
-import { fetchMarketRegime, fetchSignals, fetchOptions, postRefreshCache, fetchTrades } from './api'
+import { fetchMarketRegime, fetchSignals, fetchOptions, fetchSpreads, postRefreshCache, fetchTrades } from './api'
 import type { SignalGroup } from './api'
 import { MarketBanner } from './components/MarketBanner'
 import { ActionSummary } from './components/ActionSummary'
 import { SignalsTable } from './components/SignalsTable'
 import { OptionsPanel } from './components/OptionsPanel'
+import { SpreadScanner } from './components/SpreadScanner'
 import { WatchlistEditor } from './components/WatchlistEditor'
 import { TradeLog } from './components/TradeLog'
 import { PnLChart } from './components/PnLChart'
 import { OptionsTradeLog } from './components/OptionsTradeLog'
-import type { MarketRegime, SignalsResponse, OptionsResponse, Trade } from './types'
+import type { MarketRegime, SignalsResponse, OptionsResponse, SpreadOpportunitiesResponse, Trade } from './types'
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000
 
@@ -184,6 +185,7 @@ export default function App() {
   const [regime, setRegime] = useState<MarketRegime | null>(null)
   const [signalsByGroup, setSignalsByGroup] = useState<Partial<Record<SignalGroup, SignalsResponse>>>({})
   const [options, setOptions] = useState<OptionsResponse | null>(null)
+  const [spreads, setSpreads] = useState<SpreadOpportunitiesResponse | null>(null)
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
   const [groupLoading, setGroupLoading] = useState(false)
@@ -215,16 +217,18 @@ export default function App() {
     setError(null)
     try {
       if (clearCache) await postRefreshCache()
-      const [r, s, o, t] = await Promise.all([
+      const [r, s, o, sp, t] = await Promise.all([
         fetchMarketRegime(),
         fetchSignals('core'),
         fetchOptions(),
+        fetchSpreads(),
         fetchTrades(),
       ])
       setRegime('error' in r ? null : r)
       setSignalsByGroup({ core: 'error' in s ? undefined : s })
       setSignalGroup('core')
       setOptions(o)
+      setSpreads(sp)
       setTrades(t.trades)
       setLastRefresh(new Date())
     } catch {
@@ -264,6 +268,7 @@ export default function App() {
               {regime && <MarketBanner regime={regime} />}
               {signals && <ActionSummary signals={signals} />}
               {options && <OptionsPanel options={options} />}
+              {spreads && <SpreadScanner spreads={spreads} />}
               <PnLChart trades={trades} />
             </>
           )}
@@ -295,7 +300,13 @@ export default function App() {
               </div>
 
               {(loading || groupLoading)
-                ? null
+                ? (groupLoading && signalGroup === 'screener' && (
+                    <div className="rounded-2xl border p-8 text-sm text-center space-y-2"
+                      style={{ background: 'var(--surface)', borderColor: 'var(--border)', color: '#888' }}>
+                      <div>Scanning 70 stocks for live setups…</div>
+                      <div className="text-xs" style={{ color: '#555' }}>Takes about 15–20 seconds</div>
+                    </div>
+                  ))
                 : signals
                   ? <SignalsTable signals={signals} group={signalGroup} />
                   : (
