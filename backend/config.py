@@ -2,7 +2,14 @@ PORTFOLIO_SIZE_SGD = 5000
 PORTFOLIO_CURRENCY = "SGD"
 
 # Crypto swing trades — fixed position size, 24/7 monitoring
-CRYPTO_WATCHLIST = ["BTC-USD", "ETH-USD", "SOL-USD"]
+CRYPTO_WATCHLIST = [
+    "BTC-USD", "ETH-USD", "SOL-USD",
+    # Altcoin scan 2026-06-16 — added for 200 SMA crossover monitoring
+    "INJ-USD", "TRX-USD",           # immediate BUY signals
+    "XRP-USD", "ADA-USD", "AVAX-USD", "LINK-USD", "DOT-USD",
+    "DOGE-USD", "LTC-USD", "ATOM-USD", "HBAR-USD",
+    "SUI20947-USD", "OP-USD", "ARB11841-USD", "WIF-USD", "APT21794-USD",
+]
 CRYPTO_POSITION_SGD = 350   # ~$260 USD per trade
 
 # Core watchlist — swing trades, technical signals apply
