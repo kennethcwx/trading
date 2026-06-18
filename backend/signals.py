@@ -62,7 +62,7 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
                 weeks = (datetime.today() - datetime.fromisoformat(entry_date_str)).days // 7
                 if weeks >= MAX_HOLD_WEEKS and pct_gain < 5:
                     return _signal("SELL", "MEDIUM",
-                                   [f"Time stop: {weeks}w held with <5% gain — redeploy capital"],
+                                   [f"Time stop: {weeks}w held with under 5% gain — redeploy capital"],
                                    "Close and redeploy")
             except ValueError:
                 pass
@@ -106,7 +106,7 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
                            "Wait for sector ETF to reclaim 200 SMA before entering")
 
         if mean_rev:
-            tech_reasons = [f"Mean-reversion: RSI {rsi:.0f} < {RSI_ENTRY} + above 200 SMA"]
+            tech_reasons = [f"Mean-reversion: RSI {rsi:.0f} below {RSI_ENTRY} + above 200 SMA"]
             if above_50:
                 tech_reasons.append("Pullback within uptrend (above 50 SMA)")
         else:
@@ -175,7 +175,7 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
 
     reasons = []
     if rsi and rsi > RSI_EXIT:
-        reasons.append(f"Overbought — RSI {rsi:.0f}, wait for pullback to <{RSI_ENTRY}")
+        reasons.append(f"Overbought — RSI {rsi:.0f}, wait for pullback below {RSI_ENTRY}")
     elif not above_200:
         reasons.append("Below 200 SMA — not in uptrend")
     else:

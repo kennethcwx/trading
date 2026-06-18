@@ -9,27 +9,34 @@ TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 
+def _post_message(text: str, parse_mode: str | None) -> None:
+    payload = {"chat_id": CHAT_ID, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    urllib.request.urlopen(req, timeout=8)
+
+
 def send(text: str) -> bool:
     if not TOKEN or not CHAT_ID:
         logger.warning("Telegram not configured — skipping notification")
         return False
     try:
-        data = json.dumps({
-            "chat_id": CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML",
-        }).encode()
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=8)
+        _post_message(text, "HTML")
         return True
     except Exception as e:
-        logger.warning(f"Telegram send failed: {e}")
-        return False
+        logger.warning(f"Telegram send failed (HTML): {e} — retrying as plain text")
+        try:
+            _post_message(text, None)
+            return True
+        except Exception as e2:
+            logger.error(f"Telegram send failed (plain text fallback too): {e2}")
+            return False
 
 
 def _pct(current: float, reference: float) -> str:
