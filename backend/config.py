@@ -5,7 +5,9 @@ PORTFOLIO_CURRENCY = "SGD"
 CRYPTO_WATCHLIST = [
     "BTC-USD", "ETH-USD", "SOL-USD",
     # Altcoin scan 2026-06-16 — added for 200 SMA crossover monitoring
-    "INJ-USD", "TRX-USD",           # immediate BUY signals
+    "INJ-USD",           # immediate BUY signal
+    # TRX-USD dropped 2026-06-19 — backtest showed 20% win rate / -1.1% avg (365d)
+    # and 0% win rate / -3.30% expectancy out-of-sample across all strategy variants
     "XRP-USD", "ADA-USD", "AVAX-USD", "LINK-USD", "DOT-USD",
     "DOGE-USD", "LTC-USD", "ATOM-USD", "HBAR-USD",
     "SUI20947-USD", "OP-USD", "ARB11841-USD", "WIF-USD", "APT21794-USD",
