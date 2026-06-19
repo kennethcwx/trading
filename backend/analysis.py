@@ -73,12 +73,14 @@ def get_market_regime() -> dict:
     vix_hist = _fetch_history("^VIX", period="5d")
     fx_hist = _fetch_history("SGDUSD=X", period="5d")
 
-    if spy_hist.empty or len(spy_hist) < SMA_LONG:
+    spy_close = spy_hist["Close"].dropna() if not spy_hist.empty else spy_hist
+    if spy_close.empty or len(spy_close) < SMA_LONG:
         return {"error": "Insufficient SPY data"}
 
-    spy_close = spy_hist["Close"]
     sma200 = spy_close.rolling(SMA_LONG).mean().iloc[-1]
     spy_price = spy_close.iloc[-1]
+    if pd.isna(sma200) or pd.isna(spy_price):
+        return {"error": "Insufficient SPY data"}
     regime_ok = bool(spy_price > sma200)
 
     vix = float(vix_hist["Close"].iloc[-1]) if not vix_hist.empty else 18.0
