@@ -82,6 +82,8 @@ def get_market_regime() -> dict:
     regime_ok = bool(spy_price > sma200)
 
     vix = float(vix_hist["Close"].iloc[-1]) if not vix_hist.empty else 18.0
+    if pd.isna(vix):
+        vix = 18.0
     if vix > VIX_DEFENSIVE:
         vix_status = "EXTREME"
     elif vix > VIX_CAUTION:
@@ -93,6 +95,8 @@ def get_market_regime() -> dict:
     size_mult = 0.5 if (not regime_ok or vix > VIX_CAUTION) else 1.0
 
     sgd_to_usd = float(fx_hist["Close"].iloc[-1]) if not fx_hist.empty else 0.74
+    if pd.isna(sgd_to_usd):
+        sgd_to_usd = 0.74
 
     return {
         "spy_price": round(float(spy_price), 2),
