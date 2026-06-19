@@ -115,6 +115,7 @@ def get_market_regime() -> dict:
 
 def get_ticker_analysis(symbol: str) -> dict | None:
     hist = _fetch_history(symbol)
+    hist = hist.dropna(subset=["Close"]) if not hist.empty else hist
     if hist.empty or len(hist) < SMA_LONG + 5:
         return None
 
@@ -398,6 +399,8 @@ def get_bull_put_spread(symbol: str, price: float, width: float = SPREAD_WIDTH) 
     the money, buy a put `width` dollars further out to cap risk. Returns net credit,
     max profit/loss, breakeven and ROI on risk. Cached 10 min."""
     import datetime as _dt
+    if pd.isna(price):
+        return None
     short_target = round(price * 0.95 / 5) * 5   # nearest $5 strike, ~5% OTM
     key = f"bull_put_spread:{symbol}:{short_target}:{width}"
     with _cache_lock:

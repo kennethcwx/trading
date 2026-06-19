@@ -1,6 +1,7 @@
 import asyncio
 import itertools
 import logging
+import math
 import uvicorn
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -11,6 +12,7 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import ibkr
@@ -809,7 +811,25 @@ async def lifespan(app: FastAPI):
     briefing.cancel()
 
 
-app = FastAPI(lifespan=lifespan)
+def _sanitize_nan(obj):
+    """yfinance occasionally yields NaN floats that crash Starlette's strict JSON
+    encoder; replace them with None so a single bad data point doesn't 500 the whole
+    response."""
+    if isinstance(obj, float):
+        return None if math.isnan(obj) or math.isinf(obj) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_nan(v) for v in obj]
+    return obj
+
+
+class SafeJSONResponse(JSONResponse):
+    def render(self, content):
+        return super().render(_sanitize_nan(content))
+
+
+app = FastAPI(lifespan=lifespan, default_response_class=SafeJSONResponse)
 
 app.add_middleware(
     CORSMiddleware,
