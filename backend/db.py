@@ -73,6 +73,7 @@ def init_db():
             strategy      TEXT NOT NULL,
             phase         INTEGER NOT NULL DEFAULT 1,
             strike        REAL NOT NULL,
+            long_strike   REAL,
             expiry_date   TEXT NOT NULL,
             dte_at_entry  INTEGER,
             premium       REAL NOT NULL,
@@ -91,6 +92,7 @@ def init_db():
             strategy      TEXT NOT NULL,
             phase         INTEGER NOT NULL DEFAULT 1,
             strike        REAL NOT NULL,
+            long_strike   REAL,
             expiry_date   TEXT NOT NULL,
             dte_at_entry  INTEGER,
             premium       REAL NOT NULL,
@@ -103,7 +105,35 @@ def init_db():
             created_at    TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS price_alerts (
+            id         SERIAL PRIMARY KEY,
+            symbol     TEXT NOT NULL,
+            target     REAL NOT NULL,
+            direction  TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """ if _USE_PG else """
+        CREATE TABLE IF NOT EXISTS price_alerts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol     TEXT NOT NULL,
+            target     REAL NOT NULL,
+            direction  TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
+
+    # Migration: add long_strike to options_trades for pre-existing DBs
+    if _USE_PG:
+        cur.execute("ALTER TABLE options_trades ADD COLUMN IF NOT EXISTS long_strike REAL")
+    else:
+        cur.execute("PRAGMA table_info(options_trades)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "long_strike" not in cols:
+            cur.execute("ALTER TABLE options_trades ADD COLUMN long_strike REAL")
+    conn.commit()
+
     cur.close()
     conn.close()
 
@@ -159,3 +189,35 @@ def set_watchlist(symbols: list[str]) -> None:
     conn.commit()
     cur.close()
     conn.close()
+
+
+# ── Price alerts ──────────────────────────────────────────────────────────────
+
+def get_price_alerts() -> list[dict]:
+    return fetch("SELECT * FROM price_alerts ORDER BY id")
+
+
+def add_price_alert(symbol: str, target: float, direction: str) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"INSERT INTO price_alerts (symbol, target, direction) VALUES ({_ph()}, {_ph()}, {_ph()})"
+        + (" RETURNING id" if _USE_PG else ""),
+        (symbol, target, direction),
+    )
+    if _USE_PG:
+        new_id = cur.fetchone()["id"]
+    else:
+        new_id = cur.lastrowid
+    conn.commit()
+    cur.close()
+    conn.close()
+    return new_id
+
+
+def remove_price_alert(alert_id: int) -> bool:
+    row = fetchone("SELECT id FROM price_alerts WHERE id=?", (alert_id,))
+    if not row:
+        return False
+    mutate("DELETE FROM price_alerts WHERE id=?", (alert_id,))
+    return True

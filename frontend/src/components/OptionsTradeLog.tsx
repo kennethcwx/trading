@@ -23,11 +23,12 @@ const inputStyle = { background: 'var(--surface-2)', border: '1px solid var(--bo
 function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => void }) {
   const [form, setForm] = useState({
     symbol: '', strategy: 'Cash-Secured Put', phase: '1',
-    strike: '', expiry_date: '', dte_at_entry: '', premium: '',
+    strike: '', long_strike: '', expiry_date: '', dte_at_entry: '', premium: '',
     contracts: '1', open_date: today(), notes: '',
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const isSpread = form.strategy === 'Bull Put Spread'
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm(f => ({ ...f, [k]: e.target.value }))
@@ -38,18 +39,25 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
       setError('Symbol, Strike, Expiry, and Premium are required')
       return
     }
+    if (isSpread && !form.long_strike) {
+      setError('Long strike is required for a spread')
+      return
+    }
     const strike = parseFloat(form.strike)
+    const longStrike = isSpread ? parseFloat(form.long_strike) : undefined
     const premium = parseFloat(form.premium)
     const contracts = parseInt(form.contracts) || 1
     const dte = form.dte_at_entry ? parseInt(form.dte_at_entry) : undefined
-    if (isNaN(strike) || isNaN(premium)) { setError('Strike and Premium must be numbers'); return }
+    if (isNaN(strike) || isNaN(premium) || (isSpread && isNaN(longStrike as number))) {
+      setError('Strike, long strike, and premium must be numbers'); return
+    }
     setSaving(true); setError(null)
     try {
       await addOptionsTrade({
         symbol: form.symbol.toUpperCase().trim(),
         strategy: form.strategy,
         phase: parseInt(form.phase),
-        strike, expiry_date: form.expiry_date,
+        strike, long_strike: longStrike, expiry_date: form.expiry_date,
         dte_at_entry: dte, premium, contracts,
         open_date: form.open_date,
         notes: form.notes || undefined,
@@ -82,18 +90,27 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
             className={inputCls} style={inputStyle}>
             <option>Cash-Secured Put</option>
             <option>Covered Call</option>
+            <option>Bull Put Spread</option>
           </select>
         </div>
         {/* Phase auto-syncs with strategy */}
         {/* Strike */}
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: '#888' }}>Strike <span style={{ color: 'var(--red)' }}>*</span></label>
+          <label className="block text-xs mb-1.5" style={{ color: '#888' }}>{isSpread ? 'Short strike' : 'Strike'} <span style={{ color: 'var(--red)' }}>*</span></label>
           <input type="text" value={form.strike} onChange={set('strike')} placeholder="14.00"
             className={inputCls} style={inputStyle} />
         </div>
+        {/* Long strike — spreads only */}
+        {isSpread && (
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: '#888' }}>Long strike <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input type="text" value={form.long_strike} onChange={set('long_strike')} placeholder="9.00"
+              className={inputCls} style={inputStyle} />
+          </div>
+        )}
         {/* Premium */}
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: '#888' }}>Premium / share <span style={{ color: 'var(--red)' }}>*</span></label>
+          <label className="block text-xs mb-1.5" style={{ color: '#888' }}>{isSpread ? 'Net credit / contract' : 'Premium / share'} <span style={{ color: 'var(--red)' }}>*</span></label>
           <input type="text" value={form.premium} onChange={set('premium')} placeholder="0.96"
             className={inputCls} style={inputStyle} />
         </div>
@@ -132,7 +149,7 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
       {/* Preview */}
       {form.premium && form.contracts && (
         <div className="mb-4 px-3 py-2 rounded-lg text-xs font-mono" style={{ background: 'var(--surface)', color: 'var(--teal)' }}>
-          Total premium collected: ${(parseFloat(form.premium || '0') * 100 * (parseInt(form.contracts) || 1)).toFixed(2)}
+          Total {isSpread ? 'net credit' : 'premium'} collected: ${(parseFloat(form.premium || '0') * 100 * (parseInt(form.contracts) || 1)).toFixed(2)}
         </div>
       )}
 
@@ -190,7 +207,7 @@ function CloseForm({ trade, onSave, onCancel }: { trade: OptionsTrade; onSave: (
       className="rounded-xl border p-4 mt-3"
       style={{ background: 'var(--surface)', borderColor: 'var(--border-2)' }}>
       <div className="text-xs font-medium mb-3" style={{ color: '#888' }}>
-        Close {trade.symbol} {trade.strategy} — ${trade.strike} strike
+        Close {trade.symbol} {trade.strategy} — {trade.long_strike != null ? `$${trade.strike}/$${trade.long_strike} spread` : `$${trade.strike} strike`}
       </div>
       <div className="flex flex-wrap gap-3 mb-3">
         <div>
@@ -332,7 +349,7 @@ export function OptionsTradeLog() {
                             <span className="text-xs" style={{ color: '#555' }}>{t.strategy}</span>
                           </div>
                           <div className="text-xs mt-1 font-mono" style={{ color: '#666' }}>
-                            ${t.strike} strike · expires {t.expiry_date}
+                            {t.long_strike != null ? `$${t.strike}/$${t.long_strike} spread` : `$${t.strike} strike`} · expires {t.expiry_date}
                             {t.dte_at_entry && <span> · {t.dte_at_entry} DTE at entry</span>}
                           </div>
                         </div>
@@ -390,7 +407,7 @@ export function OptionsTradeLog() {
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0"
                       style={{ background: ss.bg, color: ss.color }}>{ss.label}</span>
                     <span className="text-xs font-mono flex-1" style={{ color: '#555' }}>
-                      ${t.strike} · {t.expiry_date}
+                      {t.long_strike != null ? `$${t.strike}/$${t.long_strike}` : `$${t.strike}`} · {t.expiry_date}
                     </span>
                     <span className="text-xs hidden sm:block" style={{ color: '#555' }}>
                       +${t.total_premium.toFixed(2)} collected

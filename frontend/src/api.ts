@@ -1,4 +1,4 @@
-import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, SpreadOpportunitiesResponse, TradesResponse, WatchlistResponse, OptionsTradesResponse } from './types'
+import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, SpreadOpportunitiesResponse, TradesResponse, WatchlistResponse, OptionsTradesResponse, AlertsResponse, AlertDirection } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? ''
 
@@ -57,7 +57,7 @@ export const fetchOptionsTrades = () => get<OptionsTradesResponse>('/options-tra
 
 export async function addOptionsTrade(data: {
   symbol: string; strategy: string; phase: number
-  strike: number; expiry_date: string; dte_at_entry?: number
+  strike: number; long_strike?: number; expiry_date: string; dte_at_entry?: number
   premium: number; contracts: number; open_date: string; notes?: string
 }) {
   await apiFetch('/options-trades', {
@@ -87,4 +87,18 @@ export async function updateWatchlist(symbols: string[]) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ symbols }),
   })
+}
+
+export const fetchAlerts = () => get<AlertsResponse>('/alerts')
+
+export async function addAlert(data: { symbol: string; target: number; direction?: AlertDirection }) {
+  await apiFetch('/alerts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+}
+
+export async function deleteAlert(id: number) {
+  await apiFetch(`/alerts/${id}`, { method: 'DELETE' })
 }

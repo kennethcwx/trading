@@ -1,5 +1,4 @@
 import asyncio
-import itertools
 import logging
 import math
 import uvicorn
@@ -27,8 +26,6 @@ logging.basicConfig(level=logging.INFO)
 ACTIONABLE = {"BUY", "SELL", "SELL_HALF", "REVIEW"}
 _last_signals: dict[str, str] = {}
 _last_crypto_signals: dict[str, str] = {}
-_price_alerts: dict[int, dict] = {}
-_alert_id_gen = itertools.count(1)
 
 ET = ZoneInfo("America/New_York")
 
@@ -146,10 +143,8 @@ async def signal_watcher():
                         # Auto-register stop and target price alerts
                         stop  = d["analysis"]["stop_loss"]
                         target = d["analysis"]["profit_target"]
-                        aid_stop   = next(_alert_id_gen)
-                        aid_target = next(_alert_id_gen)
-                        _price_alerts[aid_stop]   = {"symbol": symbol, "target": stop,   "direction": "below"}
-                        _price_alerts[aid_target] = {"symbol": symbol, "target": target, "direction": "above"}
+                        db.add_price_alert(symbol, stop, "below")
+                        db.add_price_alert(symbol, target, "above")
                         logging.info(f"Auto-alerts set for {symbol}: SL ${stop:.2f} / TP ${target:.2f}")
 
                     msg = telegram_bot.format_signal(
@@ -160,8 +155,7 @@ async def signal_watcher():
                 _last_signals[symbol] = action
 
             # Price alerts
-            fired_ids = []
-            for alert_id, alert in list(_price_alerts.items()):
+            for alert in db.get_price_alerts():
                 analysis = await loop.run_in_executor(None, get_ticker_analysis, alert["symbol"])
                 if not analysis:
                     continue
@@ -179,9 +173,7 @@ async def signal_watcher():
                         f"Current  ${current:.2f}"
                         f"</code>"
                     )
-                    fired_ids.append(alert_id)
-            for aid in fired_ids:
-                _price_alerts.pop(aid, None)
+                    db.remove_price_alert(alert["id"])
 
         except Exception as e:
             logging.warning(f"Signal watcher error: {e}")
@@ -265,8 +257,8 @@ async def crypto_watcher():
                         telegram_bot.send(msg)
                         stop   = r["analysis"]["stop_loss"]
                         target = r["analysis"]["profit_target"]
-                        _price_alerts[next(_alert_id_gen)] = {"symbol": symbol, "target": stop,   "direction": "below"}
-                        _price_alerts[next(_alert_id_gen)] = {"symbol": symbol, "target": target, "direction": "above"}
+                        db.add_price_alert(symbol, stop, "below")
+                        db.add_price_alert(symbol, target, "above")
 
                     # Immediate alert: exit signal on a held position — don't wait for digest
                     elif r["position"] and action in ("SELL", "SELL_HALF", "REVIEW"):
@@ -293,6 +285,12 @@ class WatchlistUpdate(BaseModel):
     symbols: list[str]
 
 
+class PriceAlertIn(BaseModel):
+    symbol: str
+    target: float
+    direction: str | None = None   # 'above' | 'below' — inferred from current price if omitted
+
+
 class TradeIn(BaseModel):
     symbol: str
     shares: float
@@ -312,10 +310,11 @@ class OptionsTradeIn(BaseModel):
     symbol: str
     strategy: str
     phase: int = 1
-    strike: float
+    strike: float                       # short strike for spreads
+    long_strike: float | None = None    # set for two-leg spreads only
     expiry_date: str
     dte_at_entry: int | None = None
-    premium: float
+    premium: float                      # net credit per contract for spreads
     contracts: int = 1
     open_date: str
     notes: str | None = None
@@ -522,8 +521,7 @@ async def handle_telegram_command(text: str):
             return
         current = analysis["price"]
         direction = "above" if current < target else "below"
-        alert_id = next(_alert_id_gen)
-        _price_alerts[alert_id] = {"symbol": symbol, "target": target, "direction": direction}
+        alert_id = db.add_price_alert(symbol, target, direction)
         arrow = "↑" if direction == "above" else "↓"
         telegram_bot.send(
             f"🔔 Alert #{alert_id} set — <b>{symbol}</b>\n\n"
@@ -535,13 +533,14 @@ async def handle_telegram_command(text: str):
         )
 
     elif cmd == "/alerts":
-        if not _price_alerts:
+        alerts = db.get_price_alerts()
+        if not alerts:
             telegram_bot.send("No active price alerts. Use /alert AAPL 200 to set one.")
             return
         lines = ["🔔 <b>Active Alerts</b>", ""]
-        for aid, a in _price_alerts.items():
+        for a in alerts:
             arrow = "↑" if a["direction"] == "above" else "↓"
-            lines.append(f"<code>#{aid}  {a['symbol']:<6}  {arrow}  ${a['target']:.2f}</code>")
+            lines.append(f"<code>#{a['id']}  {a['symbol']:<6}  {arrow}  ${a['target']:.2f}</code>")
         lines.append("\nUse /removealert &lt;id&gt; to cancel one.")
         telegram_bot.send("\n".join(lines))
 
@@ -554,7 +553,7 @@ async def handle_telegram_command(text: str):
         except ValueError:
             telegram_bot.send("Usage: /removealert 1")
             return
-        if _price_alerts.pop(alert_id, None):
+        if db.remove_price_alert(alert_id):
             telegram_bot.send(f"✅ Alert #{alert_id} removed.")
         else:
             telegram_bot.send(f"Alert #{alert_id} not found. Use /alerts to see active ones.")
@@ -850,6 +849,29 @@ async def update_watchlist(body: WatchlistUpdate):
     db.set_watchlist(symbols)
     invalidate_cache()
     return {"watchlist": symbols}
+
+
+@app.get("/api/alerts")
+async def get_alerts():
+    return {"alerts": db.get_price_alerts()}
+
+
+@app.post("/api/alerts")
+async def add_alert(alert: PriceAlertIn):
+    symbol = alert.symbol.strip().upper()
+    analysis = await asyncio.get_event_loop().run_in_executor(None, get_ticker_analysis, symbol)
+    if not analysis:
+        raise HTTPException(status_code=400, detail=f"Could not fetch data for {symbol}")
+    direction = alert.direction or ("above" if analysis["price"] < alert.target else "below")
+    alert_id = db.add_price_alert(symbol, alert.target, direction)
+    return {"id": alert_id, "symbol": symbol, "target": alert.target, "direction": direction}
+
+
+@app.delete("/api/alerts/{alert_id}")
+async def delete_alert(alert_id: int):
+    if not db.remove_price_alert(alert_id):
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return {"status": "ok"}
 
 
 @app.get("/api/status")
@@ -1456,9 +1478,9 @@ async def get_options_trades():
 @app.post("/api/options-trades")
 async def add_options_trade(trade: OptionsTradeIn):
     db.mutate(
-        "INSERT INTO options_trades (symbol, strategy, phase, strike, expiry_date, dte_at_entry, premium, contracts, open_date, notes) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (trade.symbol.upper(), trade.strategy, trade.phase, trade.strike,
+        "INSERT INTO options_trades (symbol, strategy, phase, strike, long_strike, expiry_date, dte_at_entry, premium, contracts, open_date, notes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (trade.symbol.upper(), trade.strategy, trade.phase, trade.strike, trade.long_strike,
          trade.expiry_date, trade.dte_at_entry, trade.premium, trade.contracts,
          trade.open_date, trade.notes),
     )

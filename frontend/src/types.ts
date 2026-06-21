@@ -244,6 +244,7 @@ export interface OptionsTrade {
   strategy: string
   phase: 1 | 2
   strike: number
+  long_strike: number | null
   expiry_date: string
   dte_at_entry: number | null
   premium: number
@@ -260,4 +261,18 @@ export interface OptionsTrade {
 
 export interface OptionsTradesResponse {
   trades: OptionsTrade[]
+}
+
+export type AlertDirection = 'above' | 'below'
+
+export interface PriceAlert {
+  id: number
+  symbol: string
+  target: number
+  direction: AlertDirection
+  created_at: string
+}
+
+export interface AlertsResponse {
+  alerts: PriceAlert[]
 }

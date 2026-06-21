@@ -7,6 +7,7 @@ import { SignalsTable } from './components/SignalsTable'
 import { OptionsPanel } from './components/OptionsPanel'
 import { SpreadScanner } from './components/SpreadScanner'
 import { WatchlistEditor } from './components/WatchlistEditor'
+import { PriceAlerts } from './components/PriceAlerts'
 import { TradeLog } from './components/TradeLog'
 import { PnLChart } from './components/PnLChart'
 import { OptionsTradeLog } from './components/OptionsTradeLog'
@@ -317,6 +318,7 @@ export default function App() {
                   )
               }
               <WatchlistEditor onSave={() => void refresh()} />
+              <PriceAlerts />
             </>
           )}
 
