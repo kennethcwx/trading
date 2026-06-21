@@ -2,15 +2,12 @@ PORTFOLIO_SIZE_SGD = 5000
 PORTFOLIO_CURRENCY = "SGD"
 
 # Crypto swing trades — fixed position size, 24/7 monitoring
+# Trimmed to majors 2026-06-21 — 18mo backtest showed majors (BTC/ETH/SOL/XRP/INJ)
+# at +1.62% expectancy/trade vs the 13 dropped alts at -2.32% expectancy/trade.
+# Small-cap alts (DOT, ARB, APT, HBAR especially) blow through technical stops with
+# violent trend-defying drops; the strategy's edge only holds on liquid majors.
 CRYPTO_WATCHLIST = [
-    "BTC-USD", "ETH-USD", "SOL-USD",
-    # Altcoin scan 2026-06-16 — added for 200 SMA crossover monitoring
-    "INJ-USD",           # immediate BUY signal
-    # TRX-USD dropped 2026-06-19 — backtest showed 20% win rate / -1.1% avg (365d)
-    # and 0% win rate / -3.30% expectancy out-of-sample across all strategy variants
-    "XRP-USD", "ADA-USD", "AVAX-USD", "LINK-USD", "DOT-USD",
-    "DOGE-USD", "LTC-USD", "ATOM-USD", "HBAR-USD",
-    "SUI20947-USD", "OP-USD", "ARB11841-USD", "WIF-USD", "APT21794-USD",
+    "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "INJ-USD",
 ]
 CRYPTO_POSITION_SGD = 350   # ~$260 USD per trade
 
