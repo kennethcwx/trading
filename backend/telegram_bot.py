@@ -77,9 +77,11 @@ def format_signal(
     target = analysis.get("profit_target", 0)
     reason = signal["reasons"][0] if signal["reasons"] else ""
     is_crypto = position_size is not None and position_size.get("risk_sgd") is None
+    trade_type = signal.get("trade_type", "")
+    type_tag = f" · {trade_type}" if trade_type else ""
 
     HEADER = {
-        "BUY":       f"🟢 <b>BUY — {symbol}</b>",
+        "BUY":       f"🟢 <b>BUY — {symbol}{type_tag}</b>",
         "SELL":      f"🔴 <b>SELL — {symbol}</b>",
         "SELL_HALF": f"🟠 <b>SELL HALF — {symbol}</b>",
         "REVIEW":    f"🟡 <b>REVIEW — {symbol}</b>",
@@ -145,7 +147,8 @@ def format_signal(
             "</code>",
             "",
             "📋 Sell 50% at market open",
-            "   Move stop to breakeven on the rest",
+            "   Move stop to breakeven on remainder",
+            "   Trail at 10% below peak once up another 15%",
         ]
 
     elif action == "REVIEW":
@@ -264,9 +267,15 @@ def format_share_card(
         if position_size:
             size_line = f"\n💵 Position size: {position_size['shares']:.2f} shares (~S${position_size['position_value_sgd']:.0f})"
 
+        trade_type = signal.get("trade_type", "")
+        if "Momentum" in trade_type:
+            setup_desc = f"Trading at <b>${price:.2f}</b> — breaking out to a 20-day high with above-average volume, short-term trend confirmed."
+        else:
+            setup_desc = f"Trading at <b>${price:.2f}</b> — pulled back to an attractive entry zone while still in a long-term uptrend."
+
         return (
             f"📈 <b>Looking at {symbol}</b>\n\n"
-            f"Trading at <b>${price:.2f}</b> — pulled back to an attractive entry zone while still in a long-term uptrend."
+            f"{setup_desc}"
             f"{fund_line}\n\n"
             "<code>"
             f"Entry       ${price:.2f}\n"
@@ -374,12 +383,14 @@ def format_scan_results(results: dict) -> str:
             grade = (fund.get("grade") or "ETF") if fund and not fund.get("is_etf") else "ETF"
             reason = b["signal"]["reasons"][0]
             rs_str = f"  RS {b['rs_rank']}th" if b.get("rs_rank") is not None else ""
+            trade_type = b["signal"].get("trade_type", "")
+            type_tag = f"  {trade_type}" if trade_type else ""
             size_str = (
                 f"\n  <code>Size  {ps['shares']:.3f} sh  S${ps['position_value_sgd']:.0f}</code>"
                 if ps else ""
             )
             lines.append(
-                f"\n<b>{b['symbol']}</b>  [{grade}]{rs_str}\n"
+                f"\n<b>{b['symbol']}</b>  [{grade}]{rs_str}{type_tag}\n"
                 f"  {reason}\n"
                 f"  <code>Entry ~${a['price']:.2f}  Stop ${a['stop_loss']:.2f}  "
                 f"Target ${a['profit_target']:.2f}</code>"

@@ -1,7 +1,7 @@
 from datetime import datetime
 from config import (
     RSI_ENTRY, RSI_EXIT, MOMENTUM_DAYS, VOLUME_MULTIPLIER,
-    MAX_HOLD_WEEKS, PROFIT_RATIO, TRAILING_TRIGGER, TRAILING_STOP_PCT,
+    MAX_HOLD_WEEKS, PROFIT_RATIO,
     RISK_PER_TRADE_PCT, MAX_POSITION_PCT, PORTFOLIO_SIZE_SGD,
     STOP_ATR_MULT, STOP_MAX_PCT,
 )
@@ -18,6 +18,7 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
     rsi = analysis.get("rsi")
     above_200 = analysis.get("above_200sma")
     above_50 = analysis.get("above_50sma")
+    sma20_above_50 = analysis.get("sma20_above_sma50", True)
     price = analysis.get("price", 0)
     stop = analysis.get("stop_loss", 0)
     target = analysis.get("profit_target", 0)
@@ -50,12 +51,12 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         if rsi and rsi > RSI_EXIT and pct_gain > 0:
             return _signal("SELL_HALF", "MEDIUM",
                            [f"RSI overbought at {rsi:.0f} (>{RSI_EXIT}) with open gain"],
-                           "Sell 50%, move stop to breakeven on remainder")
+                           "Sell 50% · move stop to breakeven · trail at 10% if position gains another 15%")
 
         if price >= target:
             return _signal("SELL_HALF", "MEDIUM",
                            [f"Profit target reached ${target:.2f} (2:1 R:R)"],
-                           "Sell 50%, trail stop on remainder")
+                           "Sell 50% · move stop to breakeven · trail at 10% if position gains another 15%")
 
         if entry_date_str:
             try:
@@ -88,13 +89,14 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         and vol_ratio >= VOLUME_MULTIPLIER
         and rsi is not None and RSI_ENTRY < rsi < RSI_EXIT
         and above_200
+        and sma20_above_50   # 20 SMA > 50 SMA — short-term trend aligned (COMBINED variant)
     )
 
     if mean_rev or momentum:
-        label = "Mean-reversion" if mean_rev else "Momentum breakout"
+        label = "Mean-Reversion" if mean_rev else "Momentum Breakout"
 
         # ── Filter 1: RS rank — only top 25% within the current symbol set ──
-        if rs_rank is not None and rs_rank < 50:
+        if rs_rank is not None and rs_rank < 75:
             return _signal("WATCH", "LOW",
                            [f"{label} triggered but RS rank {rs_rank}th percentile — needs top 25%"],
                            f"Wait for relative strength to improve · currently ranked {rs_rank}th percentile vs watchlist")
@@ -106,11 +108,11 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
                            "Wait for sector ETF to reclaim 200 SMA before entering")
 
         if mean_rev:
-            tech_reasons = [f"Mean-reversion: RSI {rsi:.0f} below {RSI_ENTRY} + above 200 SMA"]
+            tech_reasons = [f"RSI {rsi:.0f} below {RSI_ENTRY} + above 200 SMA"]
             if above_50:
                 tech_reasons.append("Pullback within uptrend (above 50 SMA)")
         else:
-            tech_reasons = [f"Momentum breakout: 20-day high + volume {vol_ratio:.1f}x average"]
+            tech_reasons = [f"20-day high breakout · volume {vol_ratio:.1f}x average · 20 SMA above 50 SMA"]
 
         suffix = " (halve size — VIX elevated)" if vix_elevated else ""
         action_text = f"Enter position{suffix}. Stop ${stop:.2f} → Target ${target:.2f}"
@@ -146,7 +148,7 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
             if rs_flag:
                 all_reasons.append(rs_flag.strip(" · "))
             priority = "HIGH" if score >= 4 else "MEDIUM"
-            return _signal("BUY", priority, all_reasons, action_text)
+            return _signal("BUY", priority, all_reasons, action_text, trade_type=label)
 
         # ETF or no fundamental data → technical only
         priority = "HIGH" if mean_rev else "MEDIUM"
@@ -155,7 +157,7 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
             rs_3m = rel_strength.get("rs_3m")
             if rs_3m is not None and rs_3m < -10:
                 rs_note = [f"Underperforming SPY by {abs(rs_3m):.0f}% over 3m — caution"]
-        return _signal("BUY", priority, tech_reasons + rs_note, action_text)
+        return _signal("BUY", priority, tech_reasons + rs_note, action_text, trade_type=label)
 
     if above_200 and rsi is not None and rsi < 55:
         pts_away = round(rsi - RSI_ENTRY)
@@ -221,10 +223,14 @@ def calculate_position_size(portfolio_sgd: float, price_usd: float,
     }
 
 
-def _signal(action: str, priority: str, reasons: list[str], suggested: str) -> dict:
-    return {
+def _signal(action: str, priority: str, reasons: list[str], suggested: str,
+            trade_type: str | None = None) -> dict:
+    result = {
         "action": action,
         "priority": priority,
         "reasons": reasons,
         "suggested_action": suggested,
     }
+    if trade_type:
+        result["trade_type"] = trade_type
+    return result

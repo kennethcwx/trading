@@ -127,11 +127,12 @@ def get_ticker_analysis(symbol: str) -> dict | None:
     price = float(close.iloc[-1])
     sma200 = float(close.rolling(SMA_LONG).mean().iloc[-1])
     sma50 = float(close.rolling(SMA_SHORT).mean().iloc[-1])
+    sma20 = float(close.rolling(20).mean().iloc[-1])
     rsi_series = _rsi(close)
     rsi = float(rsi_series.iloc[-1])
     atr_val = float(_atr(high, low, close).iloc[-1])
 
-    avg_vol = float(volume.tail(20).mean())
+    avg_vol = float(volume.iloc[-21:-1].mean())   # 20 complete prior days, not today's partial bar
     today_vol = float(volume.iloc[-1])
     vol_ratio = round(today_vol / avg_vol, 2) if avg_vol > 0 else 1.0
 
@@ -142,6 +143,7 @@ def get_ticker_analysis(symbol: str) -> dict | None:
 
     above_200 = price > sma200
     above_50 = price > sma50
+    sma20_above_sma50 = sma20 > sma50
 
     stop = max(price - STOP_ATR_MULT * atr_val, price * (1 - STOP_MAX_PCT))
     stop_pct = round(((price - stop) / price) * 100, 1)
@@ -186,6 +188,8 @@ def get_ticker_analysis(symbol: str) -> dict | None:
         "atr": round(atr_val, 2),
         "above_200sma": above_200,
         "above_50sma": above_50,
+        "sma20_above_sma50": sma20_above_sma50,
+        "sma20": round(sma20, 2),
         "volume_ratio": vol_ratio,
         "high_20d": round(high_20d, 2),
         "high_52w": round(high_52w, 2),

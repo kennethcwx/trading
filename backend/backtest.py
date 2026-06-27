@@ -32,6 +32,8 @@ PROFIT_RATIO    = 2.0
 STOP_ATR_MULT   = 1.0
 STOP_MAX_PCT    = 0.08
 MAX_HOLD_WEEKS  = 8
+TRAILING_TRIGGER  = 0.15   # activate trailing stop when second half gains 15% from entry
+TRAILING_STOP_PCT = 0.10   # trail 10% below peak after activation
 
 SLIPPAGE_PCT    = 0.001   # 0.1% per trade (entry + exit)
 COMMISSION_PCT  = 0.0005  # 0.05% per trade leg
@@ -49,9 +51,11 @@ UNIVERSE = [
     "SPY", "QQQ", "XLK", "XLF",
 ]
 
-# Train on months 1–18, validate on months 19–24
-TRAIN_DAYS    = 548   # ~18 months
-VALIDATE_DAYS = 182   # ~6 months
+# Non-overlapping train/validate split:
+#   validate = most recent 6 months (out-of-sample)
+#   train    = the 18 months BEFORE the validate period
+VALIDATE_DAYS = 182   # ~6 months  — entries in last 182 days
+TRAIN_DAYS    = 730   # 24 months  — train entries from day 182 to day 730 ago
 
 
 # ── Indicators ────────────────────────────────────────────────────────────────
@@ -250,8 +254,17 @@ def _apply_costs(pnl_pct: float) -> float:
 
 
 def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
-         lookback_days: int) -> list[dict]:
-    cutoff = df.index[-1] - pd.Timedelta(days=lookback_days)
+         entry_start_days: int = 0, entry_end_days: int = 365) -> list[dict]:
+    """Run backtest for a single symbol.
+
+    Entry window is [today - entry_end_days, today - entry_start_days], so:
+      - validate (last 6m):  entry_start_days=0,   entry_end_days=182
+      - train   (prior 18m): entry_start_days=182,  entry_end_days=730
+    Exits can happen on any date once a position is open.
+    """
+    latest = df.index[-1]
+    entry_open  = latest - pd.Timedelta(days=entry_end_days)   # earliest allowed entry
+    entry_close = latest - pd.Timedelta(days=entry_start_days)  # latest allowed entry
     trades: list[dict] = []
     pos = None
 
@@ -292,24 +305,37 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
             elif not above200:
                 _record("trend_break", price, pos["shares"])
                 pos = None
-            elif rsi_val > RSI_EXIT and not pos["sold_half"]:
-                _record("rsi_half", price, 0.5)
-                pos["shares"]    = 0.5
-                pos["sold_half"] = True
-                pos["stop"]      = ep
-            elif price >= tgt and not pos["sold_half"]:
-                _record("target_half", price, 0.5)
-                pos["shares"]    = 0.5
-                pos["sold_half"] = True
-                pos["stop"]      = ep
-            elif weeks >= MAX_HOLD_WEEKS and (price - ep) / ep * 100 < 5:
-                _record("time_stop", price, pos["shares"])
-                pos = None
+            elif not pos["sold_half"]:
+                if rsi_val > RSI_EXIT:
+                    _record("rsi_half", price, 0.5)
+                    pos["shares"]    = 0.5
+                    pos["sold_half"] = True
+                    pos["stop"]      = ep   # move stop to breakeven
+                elif price >= tgt:
+                    _record("target_half", price, 0.5)
+                    pos["shares"]    = 0.5
+                    pos["sold_half"] = True
+                    pos["stop"]      = ep
+                elif weeks >= MAX_HOLD_WEEKS and (price - ep) / ep * 100 < 5:
+                    _record("time_stop", price, pos["shares"])
+                    pos = None
+            else:
+                # Second half — track peak and apply trailing stop once 15% gain
+                pos["peak"] = max(pos.get("peak", ep), price)
+                gain = (price - ep) / ep
+                if gain >= TRAILING_TRIGGER:
+                    trail_stop = pos["peak"] * (1 - TRAILING_STOP_PCT)
+                    if price <= trail_stop:
+                        _record("trail_stop", price, pos["shares"])
+                        pos = None
+                if pos is not None and weeks >= MAX_HOLD_WEEKS and gain * 100 < 5:
+                    _record("time_stop", price, pos["shares"])
+                    pos = None
 
             continue
 
-        # ── ENTRY (within lookback window only) ──────────────────────────────
-        if date < cutoff:
+        # ── ENTRY (within the entry window only) ─────────────────────────────
+        if not (entry_open <= date <= entry_close):
             continue
 
         sig, stop = entry_fn(row)
@@ -324,6 +350,7 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
                 "target":      price + PROFIT_RATIO * risk,
                 "shares":      1.0,
                 "sold_half":   False,
+                "peak":        price,
                 "signal_type": sig,
             }
 
@@ -450,7 +477,7 @@ def _report_compare(results: dict[str, dict[str, list[dict]]]):
     W = 78
     print(f"\n{'='*W}")
     print(f"  STRATEGY COMPARISON  (slippage {SLIPPAGE_PCT*100:.1f}% + commission {COMMISSION_PCT*100:.2f}% per leg)")
-    print(f"  Train period ~18m  |  Validation period ~6m (out-of-sample)")
+    print(f"  Train ~18m (days {VALIDATE_DAYS}–{TRAIN_DAYS} ago)  |  Validate ~6m (last {VALIDATE_DAYS}d, out-of-sample)")
     print(f"{'='*W}")
 
     header = f"  {'Variant':<18} {'Legs':>5} {'WR%':>6} {'AvgW%':>7} {'AvgL%':>7} {'Exp%':>7} {'AvgDays':>8}"
@@ -500,7 +527,9 @@ def main():
 
     if args.compare:
         print(f"\nFetching {len(symbols)} symbols for strategy comparison…")
-        print(f"Train ~18m  |  Validate ~6m  |  Slippage+commission applied\n")
+        print(f"Train ~18m (days {VALIDATE_DAYS}–{TRAIN_DAYS} ago)  |  "
+              f"Validate ~6m (last {VALIDATE_DAYS}d, out-of-sample)  |  "
+              f"Slippage+commission applied\n")
 
         # results[variant][phase] = list of trade dicts
         results: dict[str, dict[str, list[dict]]] = {v: {"train": [], "validate": []} for v in VARIANTS}
@@ -515,8 +544,12 @@ def main():
 
             counts = []
             for vname, entry_fn in VARIANTS.items():
-                train_trades    = _run(sym, df, entry_fn, TRAIN_DAYS)
-                validate_trades = _run(sym, df, entry_fn, VALIDATE_DAYS)
+                # Train: entries from TRAIN_DAYS to VALIDATE_DAYS ago (non-overlapping with validate)
+                train_trades    = _run(sym, df, entry_fn,
+                                       entry_start_days=VALIDATE_DAYS, entry_end_days=TRAIN_DAYS)
+                # Validate: entries in the most recent VALIDATE_DAYS (true out-of-sample)
+                validate_trades = _run(sym, df, entry_fn,
+                                       entry_start_days=0, entry_end_days=VALIDATE_DAYS)
                 results[vname]["train"].extend(train_trades)
                 results[vname]["validate"].extend(validate_trades)
                 counts.append(f"{vname[:3]}:{len(train_trades)+len(validate_trades)}")
@@ -534,7 +567,7 @@ def main():
             if df is None:
                 print("skip")
                 continue
-            legs = _run(sym, df, _entry_baseline, args.days)
+            legs = _run(sym, df, _entry_baseline, entry_start_days=0, entry_end_days=args.days)
             all_trades.extend(legs)
             print(f"{len(legs)} legs")
 
