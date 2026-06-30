@@ -901,6 +901,75 @@ async def send_morning_briefing():
     telegram_bot.send(scan_msg)
 
 
+async def send_sgx_morning_briefing():
+    loop = asyncio.get_event_loop()
+    now_sgt = datetime.now(SGT)
+    regime = await loop.run_in_executor(None, get_market_regime)
+
+    yf_symbols = [s + ".SI" for s in SGX_WATCHLIST]
+    sgx_data = await _fetch_batch(yf_symbols)
+
+    open_rows = db.fetch("SELECT symbol, shares, entry_price FROM trades WHERE exit_price IS NULL")
+    sgx_position_map = {
+        r["symbol"]: {"avg_cost": r["entry_price"], "shares": r["shares"]}
+        for r in open_rows if r["symbol"] in SGX_WATCHLIST
+    }
+
+    actionable, watching = [], []
+    for d in sgx_data:
+        symbol = d["symbol"].replace(".SI", "")
+        position = sgx_position_map.get(symbol)
+        signal = generate_signal(d["analysis"], position, regime)
+        action = signal["action"]
+        price = d["analysis"]["price"]
+        reason = signal["reasons"][0] if signal["reasons"] else signal["suggested_action"]
+        if action in ACTIONABLE:
+            actionable.append(f"  {action} {symbol} @ S${price:.3f} — {reason}")
+        elif action == "WATCH":
+            watching.append(f"  {symbol} @ S${price:.3f} — {reason}")
+
+    lines = [f"🇸🇬 SGX Morning — {now_sgt.strftime('%a %d %b')}, opens 9:00 AM"]
+    lines.append(f"Regime: {regime.get('overall_bias','—')} | VIX {regime.get('vix','—')}")
+    lines.append("")
+    if actionable:
+        lines.append("Actionable:")
+        lines.extend(actionable)
+    else:
+        lines.append("No actionable signals.")
+    if watching:
+        lines.append("")
+        lines.append("Watching:")
+        lines.extend(watching)
+
+    telegram_bot.send("\n".join(lines))
+
+
+async def sgx_briefing_task():
+    # Catch-up: if backend starts between 8:30 AM and market open (9:00 AM SGT), send now
+    try:
+        now_sgt = datetime.now(SGT)
+        cutoff = now_sgt.replace(hour=8, minute=30, second=0, microsecond=0)
+        market_open = now_sgt.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now_sgt.weekday() < 5 and cutoff <= now_sgt < market_open:
+            await send_sgx_morning_briefing()
+    except Exception as e:
+        logging.warning(f"SGX briefing catch-up error: {e}")
+
+    while True:
+        try:
+            now_sgt = datetime.now(SGT)
+            target = now_sgt.replace(hour=8, minute=30, second=0, microsecond=0)
+            if now_sgt >= target:
+                target += timedelta(days=1)
+            while target.weekday() >= 5:
+                target += timedelta(days=1)
+            await asyncio.sleep((target - now_sgt).total_seconds())
+            await send_sgx_morning_briefing()
+        except Exception as e:
+            logging.warning(f"SGX briefing error: {e}")
+            await asyncio.sleep(60)
+
+
 async def morning_briefing_task():
     # Catch-up: if the backend starts after 8:30 AM on a weekday and before
     # market close (4 PM ET), the briefing was missed — send it now.
@@ -955,6 +1024,7 @@ async def lifespan(app: FastAPI):
     sgx = asyncio.create_task(sgx_watcher())
     listener = asyncio.create_task(telegram_command_listener())
     briefing = asyncio.create_task(morning_briefing_task())
+    sgx_briefing = asyncio.create_task(sgx_briefing_task())
     telegram_bot.set_bot_commands()
     telegram_bot.send(telegram_bot.format_startup(db.get_watchlist()))
     yield
