@@ -98,3 +98,8 @@ IBKR_HOST = "127.0.0.1"
 IBKR_PAPER_PORT = 4002
 IBKR_LIVE_PORT = 4001
 IBKR_CLIENT_ID = 1
+
+# Futu/moomoo — SGX auto-trading via Futu OpenD
+# Bare SGX codes (no .SI suffix). yfinance appends .SI; Futu uses SG.{code}
+SGX_WATCHLIST = ["D05", "O39", "U11", "A17U", "C38U", "ME8U", "Z74", "C6L"]
+SGX_PORTFOLIO_SGD = 5000     # paper capital allocation for SGX (cash-only, no margin)

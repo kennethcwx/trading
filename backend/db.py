@@ -134,6 +134,22 @@ def init_db():
             cur.execute("ALTER TABLE options_trades ADD COLUMN long_strike REAL")
     conn.commit()
 
+    # Migration: trailing stop + A/B strategy columns for trades
+    if _USE_PG:
+        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS half_sold INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS peak_price REAL")
+        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy TEXT DEFAULT 'A'")
+    else:
+        cur.execute("PRAGMA table_info(trades)")
+        trade_cols = {row[1] for row in cur.fetchall()}
+        if "half_sold" not in trade_cols:
+            cur.execute("ALTER TABLE trades ADD COLUMN half_sold INTEGER DEFAULT 0")
+        if "peak_price" not in trade_cols:
+            cur.execute("ALTER TABLE trades ADD COLUMN peak_price REAL")
+        if "strategy" not in trade_cols:
+            cur.execute("ALTER TABLE trades ADD COLUMN strategy TEXT DEFAULT 'A'")
+    conn.commit()
+
     cur.close()
     conn.close()
 

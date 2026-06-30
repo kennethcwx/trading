@@ -236,12 +236,26 @@ def _entry_swing_low(row) -> tuple[str | None, float]:
     return None, 0.0
 
 
+def _entry_mean_rev_only(row) -> tuple[str | None, float]:
+    """Mean-reversion only — RSI < 40 + above 200 SMA. No momentum leg at all."""
+    price = float(row["Close"])
+    if price <= row["sma200"]:
+        return None, 0.0
+    rsi_val = float(row["rsi"])
+    atr_val = float(row["atr"])
+    stop    = max(price - STOP_ATR_MULT * atr_val, price * (1 - STOP_MAX_PCT))
+    if rsi_val < RSI_ENTRY:
+        return "MEAN_REV", stop
+    return None, 0.0
+
+
 VARIANTS: dict[str, callable] = {
     "BASELINE":       _entry_baseline,
     "SMA_CROSS":      _entry_sma_cross,
     "DONCHIAN_STOP":  _entry_donchian_stop,
     "COMBINED":       _entry_combined,
     "SWING_LOW":      _entry_swing_low,
+    "MEAN_REV_ONLY":  _entry_mean_rev_only,
 }
 
 

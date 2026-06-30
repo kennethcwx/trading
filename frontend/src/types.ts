@@ -221,6 +221,9 @@ export interface Trade {
   signal_reason: string | null
   notes: string | null
   created_at: string
+  strategy?: 'A' | 'B'
+  half_sold?: number
+  peak_price?: number | null
   current_price?: number | null
   unrealized_pnl?: number | null
   unrealized_pnl_pct?: number | null

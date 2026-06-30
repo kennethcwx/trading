@@ -11,7 +11,8 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
                     fundamentals: dict | None = None,
                     rel_strength: dict | None = None,
                     rs_rank: int | None = None,
-                    sector_ok: bool | None = None) -> dict:
+                    sector_ok: bool | None = None,
+                    variant: str = "COMBINED") -> dict:
     regime_ok = regime.get("regime_ok", True)
     vix_elevated = regime.get("vix_status") != "NORMAL"
 
@@ -92,7 +93,8 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         and sma20_above_50   # 20 SMA > 50 SMA — short-term trend aligned (COMBINED variant)
     )
 
-    if mean_rev or momentum:
+    signal_condition = mean_rev if variant == "MEAN_REV" else (mean_rev or momentum)
+    if signal_condition:
         label = "Mean-Reversion" if mean_rev else "Momentum Breakout"
 
         # ── Filter 1: RS rank — only top 25% within the current symbol set ──

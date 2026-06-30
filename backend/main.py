@@ -15,19 +15,23 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import ibkr
+import futu_broker
 import db
 import telegram_bot
 from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD
+from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, RISK_PER_TRADE_PCT, MAX_POSITION_PCT
 
 logging.basicConfig(level=logging.INFO)
 
 ACTIONABLE = {"BUY", "SELL", "SELL_HALF", "REVIEW"}
 _last_signals: dict[str, str] = {}
+_last_signals_b: dict[str, str] = {}
 _last_crypto_signals: dict[str, str] = {}
+_last_sgx_signals: dict[str, str] = {}
 
-ET = ZoneInfo("America/New_York")
+ET  = ZoneInfo("America/New_York")
+SGT = ZoneInfo("Asia/Singapore")
 
 
 async def _fetch_batch(symbols: list[str], max_concurrent: int = 15) -> list[dict]:
@@ -87,6 +91,19 @@ def _seconds_until_next_open() -> float:
     return max((target - now).total_seconds(), 60)
 
 
+def _sgx_market_is_open() -> bool:
+    now = datetime.now(SGT)
+    if now.weekday() >= 5:
+        return False
+    open_t  = now.replace(hour=9,  minute=0, second=0, microsecond=0)
+    close_t = now.replace(hour=17, minute=30, second=0, microsecond=0)
+    lunch_s = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    lunch_e = now.replace(hour=13, minute=0, second=0, microsecond=0)
+    if lunch_s <= now < lunch_e:
+        return False
+    return open_t <= now < close_t
+
+
 async def signal_watcher():
     await asyncio.sleep(30)  # let startup finish first
     while True:
@@ -118,6 +135,7 @@ async def signal_watcher():
 
             stock_data = await _fetch_batch(all_symbols)
             rs_rank_map = _compute_rs_ranks(stock_data)
+            batch_prices = {d["symbol"]: d["analysis"]["price"] for d in stock_data}
 
             # Pass 2: generate signals with RS rank + sector confirmation
             for d in stock_data:
@@ -147,12 +165,69 @@ async def signal_watcher():
                         db.add_price_alert(symbol, target, "above")
                         logging.info(f"Auto-alerts set for {symbol}: SL ${stop:.2f} / TP ${target:.2f}")
 
+                    if action == "SELL_HALF":
+                        trade = db.fetchone(
+                            "SELECT id, half_sold FROM trades WHERE symbol = ? AND exit_price IS NULL",
+                            (symbol,)
+                        )
+                        if trade and not trade.get("half_sold"):
+                            db.mutate(
+                                "UPDATE trades SET half_sold = 1, peak_price = ? WHERE id = ?",
+                                (d["analysis"]["price"], trade["id"])
+                            )
+
                     msg = telegram_bot.format_signal(
                         symbol, signal, d["analysis"], pos_size, d["fundamentals"]
                     )
                     telegram_bot.send(msg)
 
+                # Strategy B (Mean-Rev only) — alert only when it diverges from A
+                sig_b = generate_signal(
+                    d["analysis"], position, regime, d["fundamentals"], d["rel_strength"],
+                    rs_rank=rs_rank, sector_ok=sector_ok, variant="MEAN_REV",
+                )
+                action_b = sig_b["action"]
+                if action_b in ACTIONABLE and action_b != _last_signals_b.get(symbol) and action_b != action:
+                    telegram_bot.send(
+                        f"📊 <b>[B] {symbol} — {action_b}</b>\n"
+                        f"<code>Mean-Rev only</code>\n"
+                        f"{sig_b['suggested_action']}"
+                    )
+                _last_signals_b[symbol] = action_b
+
                 _last_signals[symbol] = action
+
+            # Trailing stop check for half-sold positions
+            half_sold_trades = db.fetch(
+                "SELECT * FROM trades WHERE exit_price IS NULL AND half_sold = 1"
+            )
+            for trade in half_sold_trades:
+                sym = trade["symbol"]
+                ep = trade["entry_price"]
+                peak = trade["peak_price"] or ep
+                current = batch_prices.get(sym)
+                if current is None:
+                    continue
+                new_peak = max(peak, current)
+                if new_peak != peak:
+                    db.mutate(
+                        "UPDATE trades SET peak_price = ? WHERE id = ?",
+                        (new_peak, trade["id"])
+                    )
+                gain = (current - ep) / ep
+                trail_stop = new_peak * (1 - TRAILING_STOP_PCT)
+                if gain >= TRAILING_TRIGGER and current <= trail_stop:
+                    telegram_bot.send(
+                        f"🔔 <b>Trail Stop — {sym}</b>\n\n"
+                        f"<code>"
+                        f"Price    ${current:.2f}\n"
+                        f"Trail    ${trail_stop:.2f}  (10% below peak)\n"
+                        f"Peak     ${new_peak:.2f}\n"
+                        f"Entry    ${ep:.2f}  ({gain*100:.1f}% gain)"
+                        f"</code>\n\n"
+                        f"Close remaining half."
+                    )
+                    db.mutate("UPDATE trades SET half_sold = 2 WHERE id = ?", (trade["id"],))
 
             # Price alerts
             for alert in db.get_price_alerts():
@@ -281,6 +356,83 @@ async def crypto_watcher():
         await asyncio.sleep(30 * 60)
 
 
+async def sgx_watcher():
+    """Auto-executes SGX signals via Futu OpenD (paper by default).
+    Runs every 5 min during SGX market hours (9:00–12:00, 13:00–17:30 SGT).
+    Position sizing is cash-only — never exceeds available cash balance."""
+    await asyncio.sleep(60)
+    while True:
+        if not _sgx_market_is_open():
+            await asyncio.sleep(5 * 60)
+            continue
+
+        try:
+            loop = asyncio.get_event_loop()
+            regime = await loop.run_in_executor(None, get_market_regime)
+
+            open_rows = db.fetch("SELECT symbol, shares, entry_price FROM trades WHERE exit_price IS NULL")
+            sgx_position_map = {
+                r["symbol"]: {"avg_cost": r["entry_price"], "shares": r["shares"]}
+                for r in open_rows if r["symbol"] in SGX_WATCHLIST
+            }
+
+            yf_symbols = [s + ".SI" for s in SGX_WATCHLIST]
+            sgx_data = await _fetch_batch(yf_symbols)
+
+            for d in sgx_data:
+                yf_sym   = d["symbol"]
+                symbol   = yf_sym.replace(".SI", "")
+                position = sgx_position_map.get(symbol)
+                signal   = generate_signal(d["analysis"], position, regime)
+                action   = signal["action"]
+                prev     = _last_sgx_signals.get(symbol)
+                price    = d["analysis"]["price"]
+
+                if action in ACTIONABLE and action != prev:
+                    order_note = ""
+                    if futu_broker.is_available():
+                        tag = " [PAPER]" if futu_broker.is_paper() else ""
+                        if action == "BUY" and not position:
+                            stop           = d["analysis"]["stop_loss"]
+                            risk_per_share = price - stop
+                            if risk_per_share > 0:
+                                risk_sgd = SGX_PORTFOLIO_SGD * RISK_PER_TRADE_PCT
+                                qty = max(1, int(risk_sgd / risk_per_share))
+                                qty = min(qty, int(SGX_PORTFOLIO_SGD * MAX_POSITION_PCT / price))
+                                # Cash-only: cap at 95% of available cash balance
+                                acct = futu_broker.get_account_summary()
+                                if acct["cash"]:
+                                    qty = min(qty, int(acct["cash"] * 0.95 / price))
+                                if qty > 0:
+                                    order_id = futu_broker.place_limit_order(symbol, qty, "BUY", price)
+                                    order_note = f"\n🤖 Auto-order: BUY {qty} @ S${price:.3f}{tag}"
+                                    if order_id:
+                                        db.mutate(
+                                            "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes, strategy) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                            (symbol, qty, datetime.today().strftime("%Y-%m-%d"), price,
+                                             "SGX Auto-BUY", f"Futu order {order_id}", "SGX"),
+                                        )
+                                        db.add_price_alert(yf_sym, d["analysis"]["stop_loss"],     "below")
+                                        db.add_price_alert(yf_sym, d["analysis"]["profit_target"], "above")
+
+                        elif action in ("SELL", "SELL_HALF") and position:
+                            shares = position["shares"]
+                            qty    = int(shares * 0.5) if action == "SELL_HALF" else int(shares)
+                            if qty > 0:
+                                order_id = futu_broker.place_limit_order(symbol, qty, "SELL", price)
+                                order_note = f"\n🤖 Auto-order: SELL {qty} @ S${price:.3f}{tag}"
+
+                    msg = telegram_bot.format_signal(symbol, signal, d["analysis"], None, d["fundamentals"])
+                    telegram_bot.send(msg + order_note)
+
+                _last_sgx_signals[symbol] = action
+
+        except Exception as e:
+            logging.warning(f"SGX watcher error: {e}")
+
+        await asyncio.sleep(5 * 60)
+
+
 class WatchlistUpdate(BaseModel):
     symbols: list[str]
 
@@ -298,6 +450,7 @@ class TradeIn(BaseModel):
     entry_price: float
     signal_reason: str | None = None
     notes: str | None = None
+    strategy: str = "A"
 
 
 class TradeClose(BaseModel):
@@ -799,6 +952,7 @@ async def lifespan(app: FastAPI):
     ibkr.connect_background(paper=True)
     watcher = asyncio.create_task(signal_watcher())
     crypto = asyncio.create_task(crypto_watcher())
+    sgx = asyncio.create_task(sgx_watcher())
     listener = asyncio.create_task(telegram_command_listener())
     briefing = asyncio.create_task(morning_briefing_task())
     telegram_bot.set_bot_commands()
@@ -1415,8 +1569,8 @@ async def get_trades():
 async def add_trade(trade: TradeIn):
     symbol = trade.symbol.upper()
     db.mutate(
-        "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes) VALUES (?, ?, ?, ?, ?, ?)",
-        (symbol, trade.shares, trade.entry_date, trade.entry_price, trade.signal_reason, trade.notes),
+        "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes, strategy) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (symbol, trade.shares, trade.entry_date, trade.entry_price, trade.signal_reason, trade.notes, trade.strategy),
     )
     loop = asyncio.get_event_loop()
     analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)

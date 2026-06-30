@@ -11,11 +11,12 @@ import { PriceAlerts } from './components/PriceAlerts'
 import { TradeLog } from './components/TradeLog'
 import { PnLChart } from './components/PnLChart'
 import { OptionsTradeLog } from './components/OptionsTradeLog'
+import { StrategyCompare } from './components/StrategyCompare'
 import type { MarketRegime, SignalsResponse, OptionsResponse, SpreadOpportunitiesResponse, Trade } from './types'
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000
 
-type Tab = 'dashboard' | 'signals' | 'trades'
+type Tab = 'dashboard' | 'signals' | 'trades' | 'compare'
 
 function marketStatus(): { label: string; dot: string } {
   const now = new Date()
@@ -61,6 +62,16 @@ function IconTrades() {
   )
 }
 
+function IconCompare() {
+  return (
+    <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="1" y="3" width="5" height="10" rx="1" />
+      <rect x="10" y="3" width="5" height="10" rx="1" />
+      <path d="M8 6v4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 function IconRefresh({ spinning }: { spinning: boolean }) {
   return (
     <svg
@@ -89,6 +100,7 @@ function Sidebar({
     { id: 'dashboard', label: 'Dashboard', icon: <IconGrid /> },
     { id: 'signals',   label: 'Signals',   icon: <IconSignal /> },
     { id: 'trades',    label: 'Trades',    icon: <IconTrades /> },
+    { id: 'compare',   label: 'A/B Compare', icon: <IconCompare /> },
   ]
 
   return (
@@ -158,6 +170,7 @@ function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
     { id: 'dashboard', label: 'Dashboard', icon: <IconGrid /> },
     { id: 'signals',   label: 'Signals',   icon: <IconSignal /> },
     { id: 'trades',    label: 'Trades',    icon: <IconTrades /> },
+    { id: 'compare',   label: 'Compare',   icon: <IconCompare /> },
   ]
 
   return (
@@ -329,6 +342,11 @@ export default function App() {
               <TradeLog onTradesChange={setTrades} />
               <OptionsTradeLog />
             </>
+          )}
+
+          {/* Compare tab */}
+          {tab === 'compare' && (
+            <StrategyCompare trades={trades} />
           )}
 
           <div className="text-xs text-center pb-2" style={{ color: '#333' }}>

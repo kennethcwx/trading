@@ -18,7 +18,7 @@ const inputStyle = { background: 'var(--surface-2)', border: '1px solid var(--bo
 
 function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => void }) {
   const [form, setForm] = useState({
-    symbol: '', shares: '', entry_date: today(), entry_price: '', signal_reason: '', notes: '',
+    symbol: '', shares: '', entry_date: today(), entry_price: '', signal_reason: '', notes: '', strategy: 'A' as 'A' | 'B',
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -46,6 +46,7 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
         entry_price: price,
         signal_reason: form.signal_reason || undefined,
         notes: form.notes || undefined,
+        strategy: form.strategy,
       })
       onSave()
     } catch (err) {
@@ -85,6 +86,25 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
             />
           </div>
         ))}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: '#888' }}>Strategy</label>
+          <div className="flex gap-2">
+            {(['A', 'B'] as const).map(s => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setForm(f => ({ ...f, strategy: s }))}
+                className="flex-1 py-2 rounded-lg text-sm font-semibold transition-all cursor-pointer"
+                style={form.strategy === s
+                  ? { background: 'var(--teal)', color: '#000' }
+                  : { background: 'var(--surface)', border: '1px solid var(--border-2)', color: '#666' }
+                }
+              >
+                {s === 'A' ? 'A (Combined)' : 'B (Mean-Rev)'}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
       <div className="flex gap-2 items-center flex-wrap">
         <button
