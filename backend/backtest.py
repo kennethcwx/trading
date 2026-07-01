@@ -51,6 +51,18 @@ UNIVERSE = [
     "SPY", "QQQ", "XLK", "XLF",
 ]
 
+# Stock → sector ETF mapping (mirrors analysis.py get_sector_etf_status).
+# ETFs in the universe have no entry — sector filter is skipped for them.
+SECTOR_ETF_MAP: dict[str, str] = {
+    "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "AMD": "XLK", "INTC": "XLK", "CRM": "XLK",
+    "GOOGL": "XLC", "META": "XLC", "DIS": "XLC",
+    "AMZN": "XLY", "TSLA": "XLY", "HD": "XLY",
+    "JPM": "XLF", "BAC": "XLF", "GS": "XLF", "V": "XLF", "MA": "XLF",
+    "JNJ": "XLV", "UNH": "XLV", "PFE": "XLV", "ABBV": "XLV",
+    "WMT": "XLP", "KO": "XLP",
+    "BA": "XLI", "CAT": "XLI",
+}
+
 # Non-overlapping train/validate split:
 #   validate = most recent 6 months (out-of-sample)
 #   train    = the 18 months BEFORE the validate period
@@ -112,6 +124,50 @@ def _prepare(symbol: str) -> pd.DataFrame | None:
     df["sma_cross_up"] = (~prev_above) & curr_above
 
     return df.dropna(subset=["sma200", "atr", "don_upper", "don_lower", "swing_low"])
+
+
+# ── Live-system filters (RS rank + sector ETF) ───────────────────────────────
+
+def _fetch_sector_above_200(etfs: set[str]) -> dict[str, pd.Series]:
+    """Returns {etf: Series[bool]} — True on dates when sector ETF is above 200 SMA."""
+    out: dict[str, pd.Series] = {}
+    for etf in etfs:
+        try:
+            df = yf.Ticker(etf).history(period="3y", auto_adjust=True)
+        except Exception:
+            continue
+        if df.empty or len(df) < SMA_LONG:
+            continue
+        sma = df["Close"].rolling(SMA_LONG).mean()
+        out[etf] = (df["Close"] > sma).dropna()
+    return out
+
+
+def _compute_rs_rank_series(
+    prepared_dfs: dict[str, pd.DataFrame],
+) -> tuple[dict[str, pd.Series], dict[str, pd.Series]]:
+    """
+    Returns (rank_map, rs3m_map):
+      rank_map  — {symbol: Series[float 0-100]} percentile RS rank within universe per date
+      rs3m_map  — {symbol: Series[float]} raw rs_3m value (stock 63d return minus SPY 63d return)
+    Mirrors live signals.py: rank >= 75 passes the RS filter.
+    """
+    spy_df = prepared_dfs.get("SPY")
+    if spy_df is None:
+        return {}, {}
+    spy_close = spy_df["Close"]
+
+    rs3m: dict[str, pd.Series] = {}
+    for sym, df in prepared_dfs.items():
+        stock_ret = df["Close"].pct_change(63) * 100
+        spy_ret   = spy_close.reindex(df.index, method="ffill").pct_change(63) * 100
+        rs3m[sym] = (stock_ret - spy_ret).dropna()
+
+    rs3m_df  = pd.DataFrame(rs3m).sort_index()
+    ranks_df = rs3m_df.rank(axis=1, pct=True) * 100
+    rank_map = {sym: ranks_df[sym].dropna() for sym in ranks_df.columns}
+    rs3m_map = {sym: rs3m[sym] for sym in rs3m}
+    return rank_map, rs3m_map
 
 
 # ── Signal variants ───────────────────────────────────────────────────────────
@@ -249,13 +305,41 @@ def _entry_mean_rev_only(row) -> tuple[str | None, float]:
     return None, 0.0
 
 
+def _entry_mean_rev_sma50(row) -> tuple[str | None, float]:
+    """Mean-reversion only, but requires price above SMA50 (stronger trend filter)."""
+    price = float(row["Close"])
+    if price <= row["sma200"] or price <= row["sma50"]:
+        return None, 0.0
+    rsi_val = float(row["rsi"])
+    atr_val = float(row["atr"])
+    stop    = max(price - STOP_ATR_MULT * atr_val, price * (1 - STOP_MAX_PCT))
+    if rsi_val < RSI_ENTRY:
+        return "MEAN_REV", stop
+    return None, 0.0
+
+
+def _entry_mean_rev_rsi35(row) -> tuple[str | None, float]:
+    """Mean-reversion only, but requires RSI < 35 (deeper pullbacks only)."""
+    price = float(row["Close"])
+    if price <= row["sma200"]:
+        return None, 0.0
+    rsi_val = float(row["rsi"])
+    atr_val = float(row["atr"])
+    stop    = max(price - STOP_ATR_MULT * atr_val, price * (1 - STOP_MAX_PCT))
+    if rsi_val < 35:
+        return "MEAN_REV", stop
+    return None, 0.0
+
+
 VARIANTS: dict[str, callable] = {
-    "BASELINE":       _entry_baseline,
-    "SMA_CROSS":      _entry_sma_cross,
-    "DONCHIAN_STOP":  _entry_donchian_stop,
-    "COMBINED":       _entry_combined,
-    "SWING_LOW":      _entry_swing_low,
-    "MEAN_REV_ONLY":  _entry_mean_rev_only,
+    "BASELINE":        _entry_baseline,
+    "SMA_CROSS":       _entry_sma_cross,
+    "DONCHIAN_STOP":   _entry_donchian_stop,
+    "COMBINED":        _entry_combined,
+    "SWING_LOW":       _entry_swing_low,
+    "MEAN_REV_ONLY":   _entry_mean_rev_only,
+    "MEAN_REV_SMA50":  _entry_mean_rev_sma50,
+    "MEAN_REV_RSI35":  _entry_mean_rev_rsi35,
 }
 
 
@@ -268,7 +352,11 @@ def _apply_costs(pnl_pct: float) -> float:
 
 
 def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
-         entry_start_days: int = 0, entry_end_days: int = 365) -> list[dict]:
+         entry_start_days: int = 0, entry_end_days: int = 365,
+         sector_above_200: pd.Series | None = None,
+         rs_rank_series: pd.Series | None = None,
+         rs3m_series: pd.Series | None = None,
+         diagnose: bool = False) -> list[dict]:
     """Run backtest for a single symbol.
 
     Entry window is [today - entry_end_days, today - entry_start_days], so:
@@ -299,7 +387,7 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
 
             def _record(reason: str, exit_px: float, frac: float):
                 raw_pnl = (exit_px - ep) / ep * 100
-                trades.append({
+                trade = {
                     "symbol":      symbol,
                     "entry_date":  pos["entry_date"].date(),
                     "exit_date":   date.date(),
@@ -311,7 +399,12 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
                     "signal_type": pos["signal_type"],
                     "days_held":   (date - pos["entry_date"]).days,
                     "frac":        frac,
-                })
+                }
+                if diagnose:
+                    trade["blocked_by"]   = pos.get("blocked_by")
+                    trade["rs_rank_val"]  = pos.get("rs_rank_val")
+                    trade["rs3m_val"]     = pos.get("rs3m_val")
+                trades.append(trade)
 
             if price <= stop:
                 _record("stop_hit", price, pos["shares"])
@@ -352,11 +445,33 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
         if not (entry_open <= date <= entry_close):
             continue
 
+        # Evaluate filters
+        blocked_rs = (
+            rs_rank_series is not None
+            and date in rs_rank_series.index
+            and float(rs_rank_series[date]) < 75
+        )
+        blocked_sector = (
+            sector_above_200 is not None
+            and date in sector_above_200.index
+            and not bool(sector_above_200[date])
+        )
+
+        if not diagnose:
+            if blocked_rs or blocked_sector:
+                continue
+
         sig, stop = entry_fn(row)
         if sig:
             risk = price - stop
             if risk <= 0:
                 continue
+            block_tag = (
+                "both"    if blocked_rs and blocked_sector else
+                "rs_rank" if blocked_rs else
+                "sector"  if blocked_sector else
+                None
+            )
             pos = {
                 "entry_price": price,
                 "entry_date":  date,
@@ -366,6 +481,9 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
                 "sold_half":   False,
                 "peak":        price,
                 "signal_type": sig,
+                "blocked_by":  block_tag,
+                "rs_rank_val": float(rs_rank_series[date]) if rs_rank_series is not None and date in rs_rank_series.index else None,
+                "rs3m_val":    float(rs3m_series[date])    if rs3m_series    is not None and date in rs3m_series.index    else None,
             }
 
     if pos:
@@ -373,7 +491,7 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
         last_px = float(last["Close"])
         last_dt = df.index[-1]
         raw_pnl = (last_px - pos["entry_price"]) / pos["entry_price"] * 100
-        trades.append({
+        trade = {
             "symbol":      symbol,
             "entry_date":  pos["entry_date"].date(),
             "exit_date":   last_dt.date(),
@@ -385,7 +503,12 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
             "signal_type": pos["signal_type"],
             "days_held":   (last_dt - pos["entry_date"]).days,
             "frac":        pos["shares"],
-        })
+        }
+        if diagnose:
+            trade["blocked_by"]  = pos.get("blocked_by")
+            trade["rs_rank_val"] = pos.get("rs_rank_val")
+            trade["rs3m_val"]    = pos.get("rs3m_val")
+        trades.append(trade)
 
     return trades
 
@@ -525,65 +648,175 @@ def _report_compare(results: dict[str, dict[str, list[dict]]]):
     print(f"\n{'='*W}\n")
 
 
+# ── Diagnostic report ────────────────────────────────────────────────────────
+
+def _report_diagnose(all_trades: list[dict]):
+    df     = pd.DataFrame(all_trades)
+    closed = df[df["reason"] != "open_mtm"].copy()
+
+    W = 78
+    print(f"\n{'='*W}")
+    print(f"  DIAGNOSTIC REPORT — filter impact on MEAN_REV_ONLY (validate window)")
+    print(f"{'='*W}")
+
+    header = f"  {'Group':<28} {'Legs':>5} {'WR%':>6} {'AvgW%':>7} {'AvgL%':>7} {'Exp%':>7}"
+    sep    = f"  {'-'*66}"
+
+    print(header)
+    print(sep)
+
+    groups = [
+        ("passed",   "Passed both filters",    closed[closed["blocked_by"].isna()]),
+        ("rs_rank",  "Blocked by RS rank",     closed[closed["blocked_by"] == "rs_rank"]),
+        ("sector",   "Blocked by sector ETF",  closed[closed["blocked_by"] == "sector"]),
+        ("both",     "Blocked by both",        closed[closed["blocked_by"] == "both"]),
+    ]
+
+    for _, label, subset in groups:
+        if subset.empty:
+            print(f"  {label:<28} {'—':>5}  no closed trades")
+            continue
+        m = _metrics(subset.to_dict("records"), label=label)
+        if m.get("legs", 0) == 0:
+            print(f"  {label:<28} {'—':>5}  no closed trades")
+        else:
+            print(f"  {label:<28} {m['legs']:>5} {m['win_rate']:>5.0f}%"
+                  f" {m['avg_win']:>+6.1f}% {m['avg_loss']:>+6.1f}% {m['exp']:>+6.2f}%")
+
+    print(sep)
+    m_all = _metrics(closed.to_dict("records"))
+    print(f"  {'All (unfiltered)':<28} {m_all['legs']:>5} {m_all['win_rate']:>5.0f}%"
+          f" {m_all['avg_win']:>+6.1f}% {m_all['avg_loss']:>+6.1f}% {m_all['exp']:>+6.2f}%")
+
+    # RS3m distribution — trades blocked by RS rank filter
+    rs_blocked = closed[
+        closed["blocked_by"].isin(["rs_rank", "both"]) & closed["rs3m_val"].notna()
+    ]
+    if not rs_blocked.empty:
+        print(f"\n  RS3m at entry — trades blocked by RS rank filter")
+        print(f"  {'Bucket':<16} {'Legs':>5} {'WR%':>6} {'Avg outcome':>13}")
+        bins   = [(-999, -10), (-10, -5), (-5, 0), (0, 5), (5, 10), (10, 999)]
+        labels = ["< -10%", "-10 to -5%", "-5 to  0%", "0 to +5%", "+5 to +10%", "> +10%"]
+        for (lo, hi), lbl in zip(bins, labels):
+            sub = rs_blocked[(rs_blocked["rs3m_val"] >= lo) & (rs_blocked["rs3m_val"] < hi)]
+            if sub.empty:
+                continue
+            wr  = (sub["pnl_pct"] > 0).mean() * 100
+            avg = sub["pnl_pct"].mean()
+            print(f"  {lbl:<16} {len(sub):>5} {wr:>5.0f}%  avg {avg:>+6.1f}%")
+
+    print(f"\n{'='*W}\n")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days",    type=int, default=365,
+    parser.add_argument("--days",       type=int, default=365,
                         help="Lookback window for single-strategy mode (default 365)")
-    parser.add_argument("--symbols", nargs="*",
+    parser.add_argument("--symbols",    nargs="*",
                         help="Override universe (e.g. --symbols AAPL MSFT NVDA)")
-    parser.add_argument("--compare", action="store_true",
-                        help="Run all 4 variants head-to-head with train/validate split")
+    parser.add_argument("--compare",    action="store_true",
+                        help="Run all variants head-to-head with train/validate split")
+    parser.add_argument("--no-filters", action="store_true",
+                        help="Skip RS rank and sector ETF filters")
+    parser.add_argument("--diagnose",   action="store_true",
+                        help="Run MEAN_REV_ONLY on validate window, tag trades by filter, show diagnostic report")
     args = parser.parse_args()
 
     symbols = args.symbols or UNIVERSE
 
-    if args.compare:
-        print(f"\nFetching {len(symbols)} symbols for strategy comparison…")
+    # ── Pass 1: fetch and prepare all symbols ────────────────────────────────
+    print(f"\nFetching {len(symbols)} symbols…")
+    prepared_dfs: dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        sys.stdout.write(f"  {sym:<6} … ")
+        sys.stdout.flush()
+        df = _prepare(sym)
+        if df is None:
+            print("skip")
+            continue
+        prepared_dfs[sym] = df
+        print("ok")
+
+    if not prepared_dfs:
+        print("No data available.")
+        return
+
+    # ── Pre-compute live-system filters ──────────────────────────────────────
+    rs_rank_map:  dict[str, pd.Series] = {}
+    rs3m_map:     dict[str, pd.Series] = {}
+    sector_cache: dict[str, pd.Series] = {}
+
+    if not args.no_filters:
+        print("\nComputing RS ranks…", end=" ", flush=True)
+        rs_rank_map, rs3m_map = _compute_rs_rank_series(prepared_dfs)
+        print("done")
+
+        needed_etfs = {SECTOR_ETF_MAP[s] for s in prepared_dfs if s in SECTOR_ETF_MAP}
+        if needed_etfs:
+            print(f"Fetching sector ETFs ({', '.join(sorted(needed_etfs))})…", end=" ", flush=True)
+            sector_cache = _fetch_sector_above_200(needed_etfs)
+            print("done")
+
+    def _filters(sym: str) -> tuple[pd.Series | None, pd.Series | None, pd.Series | None]:
+        sector_etf = SECTOR_ETF_MAP.get(sym)
+        return (
+            sector_cache.get(sector_etf) if sector_etf else None,
+            rs_rank_map.get(sym),
+            rs3m_map.get(sym),
+        )
+
+    # ── Pass 2: run backtest ──────────────────────────────────────────────────
+    if args.diagnose:
+        print(f"\nRunning diagnostic (MEAN_REV_ONLY, validate window, filters tagged)…\n")
+        all_trades: list[dict] = []
+        for sym, df in prepared_dfs.items():
+            sector_s, rs_s, rs3m_s = _filters(sym)
+            legs = _run(sym, df, _entry_mean_rev_only,
+                        entry_start_days=0, entry_end_days=VALIDATE_DAYS,
+                        sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s,
+                        diagnose=True)
+            if legs:
+                print(f"  {sym:<6}   {len(legs)} legs")
+            all_trades.extend(legs)
+        _report_diagnose(all_trades)
+
+    elif args.compare:
+        print(f"\nRunning strategy comparison…")
         print(f"Train ~18m (days {VALIDATE_DAYS}–{TRAIN_DAYS} ago)  |  "
               f"Validate ~6m (last {VALIDATE_DAYS}d, out-of-sample)  |  "
               f"Slippage+commission applied\n")
 
-        # results[variant][phase] = list of trade dicts
         results: dict[str, dict[str, list[dict]]] = {v: {"train": [], "validate": []} for v in VARIANTS}
 
-        for sym in symbols:
-            sys.stdout.write(f"  {sym:<6} … ")
-            sys.stdout.flush()
-            df = _prepare(sym)
-            if df is None:
-                print("skip")
-                continue
-
+        for sym, df in prepared_dfs.items():
+            sector_s, rs_s, rs3m_s = _filters(sym)
             counts = []
             for vname, entry_fn in VARIANTS.items():
-                # Train: entries from TRAIN_DAYS to VALIDATE_DAYS ago (non-overlapping with validate)
                 train_trades    = _run(sym, df, entry_fn,
-                                       entry_start_days=VALIDATE_DAYS, entry_end_days=TRAIN_DAYS)
-                # Validate: entries in the most recent VALIDATE_DAYS (true out-of-sample)
+                                       entry_start_days=VALIDATE_DAYS, entry_end_days=TRAIN_DAYS,
+                                       sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s)
                 validate_trades = _run(sym, df, entry_fn,
-                                       entry_start_days=0, entry_end_days=VALIDATE_DAYS)
+                                       entry_start_days=0, entry_end_days=VALIDATE_DAYS,
+                                       sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s)
                 results[vname]["train"].extend(train_trades)
                 results[vname]["validate"].extend(validate_trades)
                 counts.append(f"{vname[:3]}:{len(train_trades)+len(validate_trades)}")
-            print("  ".join(counts))
+            print(f"  {sym:<6}   {'  '.join(counts)}")
 
         _report_compare(results)
 
     else:
-        print(f"\nFetching {len(symbols)} symbols — {args.days}d backtest window…")
-        all_trades: list[dict] = []
-        for sym in symbols:
-            sys.stdout.write(f"  {sym:<6} … ")
-            sys.stdout.flush()
-            df = _prepare(sym)
-            if df is None:
-                print("skip")
-                continue
-            legs = _run(sym, df, _entry_baseline, entry_start_days=0, entry_end_days=args.days)
+        print(f"\nRunning {args.days}d backtest (BASELINE)…")
+        all_trades = []
+        for sym, df in prepared_dfs.items():
+            sector_s, rs_s, rs3m_s = _filters(sym)
+            legs = _run(sym, df, _entry_baseline,
+                        entry_start_days=0, entry_end_days=args.days,
+                        sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s)
             all_trades.extend(legs)
-            print(f"{len(legs)} legs")
+            print(f"  {sym:<6}   {len(legs)} legs")
 
         _report_single(all_trades, args.days)
 

@@ -93,12 +93,13 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         and sma20_above_50   # 20 SMA > 50 SMA — short-term trend aligned (COMBINED variant)
     )
 
-    signal_condition = mean_rev if variant == "MEAN_REV" else (mean_rev or momentum)
+    signal_condition = mean_rev if variant in ("MEAN_REV", "MEAN_REV_NO_RS") else (mean_rev or momentum)
     if signal_condition:
         label = "Mean-Reversion" if mean_rev else "Momentum Breakout"
 
         # ── Filter 1: RS rank — only top 25% within the current symbol set ──
-        if rs_rank is not None and rs_rank < 75:
+        # Skipped for MEAN_REV_NO_RS: diagnostic showed RS rank filter hurts mean-rev entries
+        if variant != "MEAN_REV_NO_RS" and rs_rank is not None and rs_rank < 75:
             return _signal("WATCH", "LOW",
                            [f"{label} triggered but RS rank {rs_rank}th percentile — needs top 25%"],
                            f"Wait for relative strength to improve · currently ranked {rs_rank}th percentile vs watchlist")

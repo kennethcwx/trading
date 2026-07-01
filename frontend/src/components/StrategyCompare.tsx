@@ -107,19 +107,21 @@ function panel(trades: Trade[], label: string, subtitle: string) {
 export function StrategyCompare({ trades }: Props) {
   const tradesA = trades.filter(t => !t.strategy || t.strategy === 'A')
   const tradesB = trades.filter(t => t.strategy === 'B')
+  const tradesC = trades.filter(t => t.strategy === 'C')
 
   return (
     <div className="space-y-4">
       <div>
         <h2 className="text-base font-semibold text-white">Strategy Comparison</h2>
         <p className="text-xs mt-1" style={{ color: '#666' }}>
-          A/B live paper trading — Strategy A (Combined) vs Strategy B (Mean-Rev only).
-          Log trades with the correct strategy label to track performance over time.
+          A/B/C live paper trading. Log trades with the correct strategy label to track performance.
+          Check-in: 2026-09-01.
         </p>
       </div>
       <div className="flex flex-col md:flex-row gap-4">
         {panel(tradesA, 'A', 'Combined: Mean-Rev or Momentum')}
         {panel(tradesB, 'B', 'Mean-Rev only')}
+        {panel(tradesC, 'C', 'Mean-Rev · no RS rank filter')}
       </div>
     </div>
   )

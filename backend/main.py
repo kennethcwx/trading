@@ -27,6 +27,7 @@ logging.basicConfig(level=logging.INFO)
 ACTIONABLE = {"BUY", "SELL", "SELL_HALF", "REVIEW"}
 _last_signals: dict[str, str] = {}
 _last_signals_b: dict[str, str] = {}
+_last_signals_c: dict[str, str] = {}
 _last_crypto_signals: dict[str, str] = {}
 _last_sgx_signals: dict[str, str] = {}
 
@@ -194,6 +195,20 @@ async def signal_watcher():
                         f"{sig_b['suggested_action']}"
                     )
                 _last_signals_b[symbol] = action_b
+
+                # Strategy C (Mean-Rev, no RS rank filter) — alert only when diverges from A and B
+                sig_c = generate_signal(
+                    d["analysis"], position, regime, d["fundamentals"], d["rel_strength"],
+                    rs_rank=rs_rank, sector_ok=sector_ok, variant="MEAN_REV_NO_RS",
+                )
+                action_c = sig_c["action"]
+                if action_c in ACTIONABLE and action_c != _last_signals_c.get(symbol) and action_c != action and action_c != action_b:
+                    telegram_bot.send(
+                        f"📊 <b>[C] {symbol} — {action_c}</b>\n"
+                        f"<code>Mean-Rev · no RS filter</code>\n"
+                        f"{sig_c['suggested_action']}"
+                    )
+                _last_signals_c[symbol] = action_c
 
                 _last_signals[symbol] = action
 
