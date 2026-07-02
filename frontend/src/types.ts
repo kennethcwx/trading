@@ -221,7 +221,7 @@ export interface Trade {
   signal_reason: string | null
   notes: string | null
   created_at: string
-  strategy?: 'A' | 'B'
+  strategy?: 'A' | 'B' | 'C'
   half_sold?: number
   peak_price?: number | null
   current_price?: number | null
