@@ -279,3 +279,25 @@ export interface PriceAlert {
 export interface AlertsResponse {
   alerts: PriceAlert[]
 }
+
+export interface NewsHeadline {
+  title: string
+  link: string | null
+  publisher: string | null
+  published: string | null
+}
+
+export interface NewsDigestItem {
+  id: number
+  symbol: string
+  move_date: string
+  pct_change: number
+  price: number
+  headlines: NewsHeadline[]
+  created_at: string
+}
+
+export interface NewsFeedResponse {
+  items: NewsDigestItem[]
+  threshold_pct: number
+}

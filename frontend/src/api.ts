@@ -1,4 +1,4 @@
-import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, SpreadOpportunitiesResponse, TradesResponse, WatchlistResponse, OptionsTradesResponse, AlertsResponse, AlertDirection } from './types'
+import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, SpreadOpportunitiesResponse, TradesResponse, WatchlistResponse, OptionsTradesResponse, AlertsResponse, AlertDirection, NewsFeedResponse } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? ''
 
@@ -102,3 +102,5 @@ export async function addAlert(data: { symbol: string; target: number; direction
 export async function deleteAlert(id: number) {
   await apiFetch(`/alerts/${id}`, { method: 'DELETE' })
 }
+
+export const fetchNewsFeed = () => get<NewsFeedResponse>('/news-feed')

@@ -8,6 +8,7 @@ import { OptionsPanel } from './components/OptionsPanel'
 import { SpreadScanner } from './components/SpreadScanner'
 import { WatchlistEditor } from './components/WatchlistEditor'
 import { PriceAlerts } from './components/PriceAlerts'
+import { NewsFeed } from './components/NewsFeed'
 import { TradeLog } from './components/TradeLog'
 import { PnLChart } from './components/PnLChart'
 import { OptionsTradeLog } from './components/OptionsTradeLog'
@@ -283,6 +284,7 @@ export default function App() {
               {signals && <ActionSummary signals={signals} />}
               {options && <OptionsPanel options={options} />}
               {spreads && <SpreadScanner spreads={spreads} />}
+              <NewsFeed />
               <PnLChart trades={trades} />
             </>
           )}

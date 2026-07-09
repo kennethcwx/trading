@@ -306,6 +306,17 @@ def format_share_card(
     return ""
 
 
+def format_news_alert(symbol: str, pct_change: float, price: float, headlines: list[dict], detected_at: str) -> str:
+    icon = "🟢" if pct_change >= 0 else "🔴"
+    sign = "+" if pct_change >= 0 else ""
+    lines = [f"{icon} <b>{symbol}</b> {sign}{pct_change:.1f}%  ${price:,.2f}  <i>({detected_at})</i>", ""]
+    for h in headlines:
+        title = h.get("title", "")
+        publisher = h.get("publisher")
+        lines.append(f"{title} — {publisher}" if publisher else title)
+    return "\n".join(lines)
+
+
 def format_crypto_digest(rows: list[dict], sgd_to_usd: float = 0.74) -> str:
     from datetime import datetime
     from zoneinfo import ZoneInfo
