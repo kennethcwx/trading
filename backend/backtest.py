@@ -128,6 +128,15 @@ def _prepare(symbol: str) -> pd.DataFrame | None:
 
 # ── Live-system filters (RS rank + sector ETF) ───────────────────────────────
 
+def _fetch_vix() -> pd.Series:
+    """Returns VIX close price indexed by date (3y history)."""
+    try:
+        df = yf.Ticker("^VIX").history(period="3y", auto_adjust=True)
+        return df["Close"].dropna() if not df.empty else pd.Series(dtype=float)
+    except Exception:
+        return pd.Series(dtype=float)
+
+
 def _fetch_sector_above_200(etfs: set[str]) -> dict[str, pd.Series]:
     """Returns {etf: Series[bool]} — True on dates when sector ETF is above 200 SMA."""
     out: dict[str, pd.Series] = {}
@@ -356,6 +365,7 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
          sector_above_200: pd.Series | None = None,
          rs_rank_series: pd.Series | None = None,
          rs3m_series: pd.Series | None = None,
+         vix_series: pd.Series | None = None,
          diagnose: bool = False) -> list[dict]:
     """Run backtest for a single symbol.
 
@@ -384,6 +394,9 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
             stop  = pos["stop"]
             tgt   = pos["target"]
             weeks = (date - pos["entry_date"]).days / 7
+            low_px  = float(row["Low"])
+            high_px = float(row["High"])
+            open_px = float(row["Open"])
 
             def _record(reason: str, exit_px: float, frac: float):
                 raw_pnl = (exit_px - ep) / ep * 100
@@ -401,25 +414,30 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
                     "frac":        frac,
                 }
                 if diagnose:
-                    trade["blocked_by"]   = pos.get("blocked_by")
-                    trade["rs_rank_val"]  = pos.get("rs_rank_val")
-                    trade["rs3m_val"]     = pos.get("rs3m_val")
+                    trade["blocked_by"]    = pos.get("blocked_by")
+                    trade["rs_rank_val"]   = pos.get("rs_rank_val")
+                    trade["rs3m_val"]      = pos.get("rs3m_val")
+                    trade["vix_at_entry"]  = pos.get("vix_at_entry")
                 trades.append(trade)
 
-            if price <= stop:
-                _record("stop_hit", price, pos["shares"])
+            # Stops fill intraday, not at the close: breach when the Low touches
+            # the stop; a gap-down opens below it and fills at the open.
+            if low_px <= stop:
+                _record("stop_hit", min(open_px, stop), pos["shares"])
                 pos = None
             elif not above200:
                 _record("trend_break", price, pos["shares"])
                 pos = None
             elif not pos["sold_half"]:
-                if rsi_val > RSI_EXIT:
+                # rsi_half requires an open gain — matches live signals.py
+                if rsi_val > RSI_EXIT and price > ep:
                     _record("rsi_half", price, 0.5)
                     pos["shares"]    = 0.5
                     pos["sold_half"] = True
                     pos["stop"]      = ep   # move stop to breakeven
-                elif price >= tgt:
-                    _record("target_half", price, 0.5)
+                elif high_px >= tgt:
+                    # Limit sell at target: gap-up above it fills at the open
+                    _record("target_half", max(open_px, tgt), 0.5)
                     pos["shares"]    = 0.5
                     pos["sold_half"] = True
                     pos["stop"]      = ep
@@ -432,8 +450,8 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
                 gain = (price - ep) / ep
                 if gain >= TRAILING_TRIGGER:
                     trail_stop = pos["peak"] * (1 - TRAILING_STOP_PCT)
-                    if price <= trail_stop:
-                        _record("trail_stop", price, pos["shares"])
+                    if low_px <= trail_stop:
+                        _record("trail_stop", min(open_px, trail_stop), pos["shares"])
                         pos = None
                 if pos is not None and weeks >= MAX_HOLD_WEEKS and gain * 100 < 5:
                     _record("time_stop", price, pos["shares"])
@@ -472,18 +490,28 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
                 "sector"  if blocked_sector else
                 None
             )
+            # Find nearest VIX date (VIX may not trade on same calendar as stock)
+            vix_at_entry = None
+            if vix_series is not None and not vix_series.empty:
+                idx = vix_series.index.searchsorted(date)
+                if idx < len(vix_series):
+                    vix_at_entry = float(vix_series.iloc[idx])
+                elif len(vix_series):
+                    vix_at_entry = float(vix_series.iloc[-1])
+
             pos = {
-                "entry_price": price,
-                "entry_date":  date,
-                "stop":        stop,
-                "target":      price + PROFIT_RATIO * risk,
-                "shares":      1.0,
-                "sold_half":   False,
-                "peak":        price,
-                "signal_type": sig,
-                "blocked_by":  block_tag,
-                "rs_rank_val": float(rs_rank_series[date]) if rs_rank_series is not None and date in rs_rank_series.index else None,
-                "rs3m_val":    float(rs3m_series[date])    if rs3m_series    is not None and date in rs3m_series.index    else None,
+                "entry_price":  price,
+                "entry_date":   date,
+                "stop":         stop,
+                "target":       price + PROFIT_RATIO * risk,
+                "shares":       1.0,
+                "sold_half":    False,
+                "peak":         price,
+                "signal_type":  sig,
+                "blocked_by":   block_tag,
+                "rs_rank_val":  float(rs_rank_series[date]) if rs_rank_series is not None and date in rs_rank_series.index else None,
+                "rs3m_val":     float(rs3m_series[date])    if rs3m_series    is not None and date in rs3m_series.index    else None,
+                "vix_at_entry": vix_at_entry,
             }
 
     if pos:
@@ -505,9 +533,10 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
             "frac":        pos["shares"],
         }
         if diagnose:
-            trade["blocked_by"]  = pos.get("blocked_by")
-            trade["rs_rank_val"] = pos.get("rs_rank_val")
-            trade["rs3m_val"]    = pos.get("rs3m_val")
+            trade["blocked_by"]   = pos.get("blocked_by")
+            trade["rs_rank_val"]  = pos.get("rs_rank_val")
+            trade["rs3m_val"]     = pos.get("rs3m_val")
+            trade["vix_at_entry"] = pos.get("vix_at_entry")
         trades.append(trade)
 
     return trades
@@ -705,6 +734,27 @@ def _report_diagnose(all_trades: list[dict]):
             avg = sub["pnl_pct"].mean()
             print(f"  {lbl:<16} {len(sub):>5} {wr:>5.0f}%  avg {avg:>+6.1f}%")
 
+    # VIX at entry distribution — all trades
+    vix_tagged = closed[closed["vix_at_entry"].notna()]
+    if not vix_tagged.empty:
+        print(f"\n  VIX at entry — all trades (unfiltered)")
+        print(f"  {'Bucket':<14} {'Legs':>5} {'WR%':>6} {'Avg outcome':>13}  hypothesis")
+        vix_bins = [(0, 15), (15, 20), (20, 25), (25, 30), (30, 999)]
+        vix_labels = [
+            ("< 15",  "complacent — mean-rev ideal"),
+            ("15–20", "normal"),
+            ("20–25", "mildly elevated"),
+            ("25–30", "elevated — potential falling knife"),
+            ("> 30",  "fear — high risk of continuation"),
+        ]
+        for (lo, hi), (lbl, note) in zip(vix_bins, vix_labels):
+            sub = vix_tagged[(vix_tagged["vix_at_entry"] >= lo) & (vix_tagged["vix_at_entry"] < hi)]
+            if sub.empty:
+                continue
+            wr  = (sub["pnl_pct"] > 0).mean() * 100
+            avg = sub["pnl_pct"].mean()
+            print(f"  {lbl:<14} {len(sub):>5} {wr:>5.0f}%  avg {avg:>+6.1f}%   {note}")
+
     print(f"\n{'='*W}\n")
 
 
@@ -747,6 +797,7 @@ def main():
     rs_rank_map:  dict[str, pd.Series] = {}
     rs3m_map:     dict[str, pd.Series] = {}
     sector_cache: dict[str, pd.Series] = {}
+    vix_series:   pd.Series            = pd.Series(dtype=float)
 
     if not args.no_filters:
         print("\nComputing RS ranks…", end=" ", flush=True)
@@ -759,24 +810,29 @@ def main():
             sector_cache = _fetch_sector_above_200(needed_etfs)
             print("done")
 
-    def _filters(sym: str) -> tuple[pd.Series | None, pd.Series | None, pd.Series | None]:
+        print("Fetching VIX…", end=" ", flush=True)
+        vix_series = _fetch_vix()
+        print("done")
+
+    def _filters(sym: str) -> tuple[pd.Series | None, pd.Series | None, pd.Series | None, pd.Series]:
         sector_etf = SECTOR_ETF_MAP.get(sym)
         return (
             sector_cache.get(sector_etf) if sector_etf else None,
             rs_rank_map.get(sym),
             rs3m_map.get(sym),
+            vix_series,
         )
 
     # ── Pass 2: run backtest ──────────────────────────────────────────────────
     if args.diagnose:
-        print(f"\nRunning diagnostic (MEAN_REV_ONLY, validate window, filters tagged)…\n")
+        print(f"\nRunning diagnostic (MEAN_REV_ONLY, validate window, filters + VIX tagged)…\n")
         all_trades: list[dict] = []
         for sym, df in prepared_dfs.items():
-            sector_s, rs_s, rs3m_s = _filters(sym)
+            sector_s, rs_s, rs3m_s, vix_s = _filters(sym)
             legs = _run(sym, df, _entry_mean_rev_only,
                         entry_start_days=0, entry_end_days=VALIDATE_DAYS,
                         sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s,
-                        diagnose=True)
+                        vix_series=vix_s, diagnose=True)
             if legs:
                 print(f"  {sym:<6}   {len(legs)} legs")
             all_trades.extend(legs)
@@ -791,7 +847,7 @@ def main():
         results: dict[str, dict[str, list[dict]]] = {v: {"train": [], "validate": []} for v in VARIANTS}
 
         for sym, df in prepared_dfs.items():
-            sector_s, rs_s, rs3m_s = _filters(sym)
+            sector_s, rs_s, rs3m_s, vix_s = _filters(sym)
             counts = []
             for vname, entry_fn in VARIANTS.items():
                 train_trades    = _run(sym, df, entry_fn,
@@ -811,7 +867,7 @@ def main():
         print(f"\nRunning {args.days}d backtest (BASELINE)…")
         all_trades = []
         for sym, df in prepared_dfs.items():
-            sector_s, rs_s, rs3m_s = _filters(sym)
+            sector_s, rs_s, rs3m_s, vix_s = _filters(sym)
             legs = _run(sym, df, _entry_baseline,
                         entry_start_days=0, entry_end_days=args.days,
                         sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s)

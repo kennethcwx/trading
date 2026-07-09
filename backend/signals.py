@@ -34,6 +34,14 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         pct_gain = ((price - avg_cost) / avg_cost) * 100 if avg_cost else 0
         entry_date_str = position.get("entry_date")
 
+        # Exit levels must be anchored at entry. The analysis stop/target float
+        # with the current price (stop is below it by construction), so using
+        # them here would make `price <= stop` unreachable. Legacy rows without
+        # stored levels fall back to the max-stop rule off avg_cost.
+        stop = position.get("stop_loss") or (avg_cost * (1 - STOP_MAX_PCT) if avg_cost else stop)
+        target = position.get("profit_target") or (
+            avg_cost * (1 + PROFIT_RATIO * STOP_MAX_PCT) if avg_cost else target)
+
         if price <= stop:
             return _signal("SELL", "HIGH",
                            [f"Stop loss triggered — price ${price:.2f} ≤ stop ${stop:.2f}"],

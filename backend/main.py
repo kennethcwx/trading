@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import math
 import uvicorn
@@ -18,9 +19,10 @@ import ibkr
 import futu_broker
 import db
 import telegram_bot
+import news
 from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, RISK_PER_TRADE_PCT, MAX_POSITION_PCT
+from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO
 
 logging.basicConfig(level=logging.INFO)
 
@@ -30,6 +32,17 @@ _last_signals_b: dict[str, str] = {}
 _last_signals_c: dict[str, str] = {}
 _last_crypto_signals: dict[str, str] = {}
 _last_sgx_signals: dict[str, str] = {}
+
+
+def _remember_signal(store: dict[str, str], strategy: str, symbol: str, action: str) -> None:
+    """Update in-memory signal state and persist on change, so redeploys don't
+    re-fire every active signal on Telegram."""
+    if store.get(symbol) != action:
+        store[symbol] = action
+        try:
+            db.save_signal_state(strategy, symbol, action)
+        except Exception as e:
+            logging.warning(f"signal_state persist failed for {strategy}/{symbol}: {e}")
 
 ET  = ZoneInfo("America/New_York")
 SGT = ZoneInfo("Asia/Singapore")
@@ -122,14 +135,17 @@ async def signal_watcher():
 
             # Build position map from open DB trades (IBKR may be offline)
             open_rows = db.fetch(
-                "SELECT symbol, shares, entry_price FROM trades WHERE exit_price IS NULL"
+                "SELECT symbol, shares, entry_price, entry_date, stop_loss, profit_target "
+                "FROM trades WHERE exit_price IS NULL"
             )
             position_map: dict[str, dict] = {}
             for row in open_rows:
                 sym = row["symbol"]
                 if sym not in position_map:
                     position_map[sym] = {"avg_cost": row["entry_price"], "shares": row["shares"],
-                                         "entry_date": row.get("entry_date")}
+                                         "entry_date": row.get("entry_date"),
+                                         "stop_loss": row.get("stop_loss"),
+                                         "profit_target": row.get("profit_target")}
 
             watchlist = db.get_watchlist()
             all_symbols = list(dict.fromkeys(watchlist + list(position_map.keys())))
@@ -168,13 +184,18 @@ async def signal_watcher():
 
                     if action == "SELL_HALF":
                         trade = db.fetchone(
-                            "SELECT id, half_sold FROM trades WHERE symbol = ? AND exit_price IS NULL",
+                            "SELECT id, half_sold, entry_price FROM trades WHERE symbol = ? AND exit_price IS NULL",
                             (symbol,)
                         )
                         if trade and not trade.get("half_sold"):
+                            # Move stop to breakeven on the remaining half (matches backtest)
                             db.mutate(
-                                "UPDATE trades SET half_sold = 1, peak_price = ? WHERE id = ?",
-                                (d["analysis"]["price"], trade["id"])
+                                "UPDATE trades SET half_sold = 1, peak_price = ?, stop_loss = ? WHERE id = ?",
+                                (d["analysis"]["price"], trade["entry_price"], trade["id"])
+                            )
+                            db.mutate(
+                                "UPDATE price_alerts SET target = ? WHERE symbol = ? AND direction = 'below'",
+                                (trade["entry_price"], symbol)
                             )
 
                     msg = telegram_bot.format_signal(
@@ -194,7 +215,7 @@ async def signal_watcher():
                         f"<code>Mean-Rev only</code>\n"
                         f"{sig_b['suggested_action']}"
                     )
-                _last_signals_b[symbol] = action_b
+                _remember_signal(_last_signals_b, "B", symbol, action_b)
 
                 # Strategy C (Mean-Rev, no RS rank filter) — alert only when diverges from A and B
                 sig_c = generate_signal(
@@ -208,9 +229,9 @@ async def signal_watcher():
                         f"<code>Mean-Rev · no RS filter</code>\n"
                         f"{sig_c['suggested_action']}"
                     )
-                _last_signals_c[symbol] = action_c
+                _remember_signal(_last_signals_c, "C", symbol, action_c)
 
-                _last_signals[symbol] = action
+                _remember_signal(_last_signals, "A", symbol, action)
 
             # Trailing stop check for half-sold positions
             half_sold_trades = db.fetch(
@@ -274,13 +295,16 @@ async def signal_watcher():
 async def _build_crypto_snapshot(regime: dict, sgd_to_usd: float) -> list[dict]:
     """Fetch signals for all crypto watchlist coins + any open crypto positions."""
     open_rows = db.fetch(
-        "SELECT symbol, shares, entry_price, entry_date FROM trades WHERE exit_price IS NULL"
+        "SELECT symbol, shares, entry_price, entry_date, stop_loss, profit_target "
+        "FROM trades WHERE exit_price IS NULL"
     )
     crypto_positions = {
         row["symbol"]: {
             "avg_cost": row["entry_price"],
             "shares": row["shares"],
             "entry_date": row.get("entry_date"),
+            "stop_loss": row.get("stop_loss"),
+            "profit_target": row.get("profit_target"),
         }
         for row in open_rows if row["symbol"] in CRYPTO_WATCHLIST
     }
@@ -357,7 +381,7 @@ async def crypto_watcher():
                         )
                         telegram_bot.send(msg)
 
-                _last_crypto_signals[symbol] = action
+                _remember_signal(_last_crypto_signals, "CRYPTO", symbol, action)
 
             # Every 4 hours: send full digest
             cycle += 1
@@ -385,9 +409,15 @@ async def sgx_watcher():
             loop = asyncio.get_event_loop()
             regime = await loop.run_in_executor(None, get_market_regime)
 
-            open_rows = db.fetch("SELECT symbol, shares, entry_price FROM trades WHERE exit_price IS NULL")
+            open_rows = db.fetch(
+                "SELECT symbol, shares, entry_price, entry_date, stop_loss, profit_target "
+                "FROM trades WHERE exit_price IS NULL"
+            )
             sgx_position_map = {
-                r["symbol"]: {"avg_cost": r["entry_price"], "shares": r["shares"]}
+                r["symbol"]: {"avg_cost": r["entry_price"], "shares": r["shares"],
+                              "entry_date": r.get("entry_date"),
+                              "stop_loss": r.get("stop_loss"),
+                              "profit_target": r.get("profit_target")}
                 for r in open_rows if r["symbol"] in SGX_WATCHLIST
             }
 
@@ -422,10 +452,13 @@ async def sgx_watcher():
                                     order_id = futu_broker.place_limit_order(symbol, qty, "BUY", price)
                                     order_note = f"\n🤖 Auto-order: BUY {qty} @ S${price:.3f}{tag}"
                                     if order_id:
+                                        # Entry == current price here, so the analysis
+                                        # stop/target are valid entry-anchored levels
                                         db.mutate(
-                                            "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes, strategy) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                            "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes, strategy, stop_loss, profit_target) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                             (symbol, qty, datetime.today().strftime("%Y-%m-%d"), price,
-                                             "SGX Auto-BUY", f"Futu order {order_id}", "SGX"),
+                                             "SGX Auto-BUY", f"Futu order {order_id}", "SGX",
+                                             d["analysis"]["stop_loss"], d["analysis"]["profit_target"]),
                                         )
                                         db.add_price_alert(yf_sym, d["analysis"]["stop_loss"],     "below")
                                         db.add_price_alert(yf_sym, d["analysis"]["profit_target"], "above")
@@ -440,10 +473,53 @@ async def sgx_watcher():
                     msg = telegram_bot.format_signal(symbol, signal, d["analysis"], None, d["fundamentals"])
                     telegram_bot.send(msg + order_note)
 
-                _last_sgx_signals[symbol] = action
+                _remember_signal(_last_sgx_signals, "SGX", symbol, action)
 
         except Exception as e:
             logging.warning(f"SGX watcher error: {e}")
+
+        await asyncio.sleep(5 * 60)
+
+
+async def news_watcher():
+    """Zero-cost news correlation: pairs notable price moves with free yfinance
+    headlines. Checks every 5 min (cheap — just price data) but only fetches and
+    stores headlines once per ticker per calendar day, the first time it crosses
+    NEWS_MOVE_THRESHOLD_PCT, so a mover that stays elevated all day doesn't
+    produce duplicate digest rows."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            loop = asyncio.get_event_loop()
+            symbol_pairs: list[tuple[str, str]] = []
+            if _market_is_open():
+                symbol_pairs += [(s, s) for s in db.get_watchlist()]
+            if _sgx_market_is_open():
+                symbol_pairs += [(s, f"{s}.SI") for s in SGX_WATCHLIST]
+
+            today = datetime.today().strftime("%Y-%m-%d")
+            for display_symbol, yf_symbol in symbol_pairs:
+                if db.has_news_digest(display_symbol, today):
+                    continue
+                result = await loop.run_in_executor(None, news.get_daily_pct_change, yf_symbol)
+                if result is None:
+                    continue
+                pct_change, price = result
+                if abs(pct_change) < NEWS_MOVE_THRESHOLD_PCT:
+                    continue
+                headlines = await loop.run_in_executor(
+                    None, news.get_recent_news, yf_symbol, NEWS_HEADLINES_PER_TICKER
+                )
+                if not headlines:
+                    continue
+                db.add_news_digest(display_symbol, today, pct_change, price, json.dumps(headlines))
+                detected_at = datetime.now(SGT).strftime("%H:%M SGT")
+                telegram_bot.send(telegram_bot.format_news_alert(
+                    display_symbol, pct_change, price, headlines, detected_at
+                ))
+                logging.info(f"News digest stored for {display_symbol}: {pct_change:+.1f}%")
+        except Exception as e:
+            logging.warning(f"News watcher error: {e}")
 
         await asyncio.sleep(5 * 60)
 
@@ -924,9 +1000,15 @@ async def send_sgx_morning_briefing():
     yf_symbols = [s + ".SI" for s in SGX_WATCHLIST]
     sgx_data = await _fetch_batch(yf_symbols)
 
-    open_rows = db.fetch("SELECT symbol, shares, entry_price FROM trades WHERE exit_price IS NULL")
+    open_rows = db.fetch(
+        "SELECT symbol, shares, entry_price, entry_date, stop_loss, profit_target "
+        "FROM trades WHERE exit_price IS NULL"
+    )
     sgx_position_map = {
-        r["symbol"]: {"avg_cost": r["entry_price"], "shares": r["shares"]}
+        r["symbol"]: {"avg_cost": r["entry_price"], "shares": r["shares"],
+                      "entry_date": r.get("entry_date"),
+                      "stop_loss": r.get("stop_loss"),
+                      "profit_target": r.get("profit_target")}
         for r in open_rows if r["symbol"] in SGX_WATCHLIST
     }
 
@@ -1033,10 +1115,21 @@ async def telegram_command_listener():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    # Restore last-sent signal state so a redeploy doesn't re-alert everything
+    try:
+        _last_signals.update(db.load_signal_state("A"))
+        _last_signals_b.update(db.load_signal_state("B"))
+        _last_signals_c.update(db.load_signal_state("C"))
+        _last_crypto_signals.update(db.load_signal_state("CRYPTO"))
+        _last_sgx_signals.update(db.load_signal_state("SGX"))
+        logging.info(f"Restored signal state: {sum(len(d) for d in (_last_signals, _last_signals_b, _last_signals_c, _last_crypto_signals, _last_sgx_signals))} entries")
+    except Exception as e:
+        logging.warning(f"Could not restore signal state: {e}")
     ibkr.connect_background(paper=True)
     watcher = asyncio.create_task(signal_watcher())
     crypto = asyncio.create_task(crypto_watcher())
     sgx = asyncio.create_task(sgx_watcher())
+    news_task = asyncio.create_task(news_watcher())
     listener = asyncio.create_task(telegram_command_listener())
     briefing = asyncio.create_task(morning_briefing_task())
     sgx_briefing = asyncio.create_task(sgx_briefing_task())
@@ -1045,6 +1138,7 @@ async def lifespan(app: FastAPI):
     yield
     watcher.cancel()
     crypto.cancel()
+    news_task.cancel()
     listener.cancel()
     briefing.cancel()
 
@@ -1113,6 +1207,14 @@ async def delete_alert(alert_id: int):
     return {"status": "ok"}
 
 
+@app.get("/api/news-feed")
+async def news_feed():
+    rows = db.get_news_digest()
+    for row in rows:
+        row["headlines"] = json.loads(row["headlines"])
+    return {"items": rows, "threshold_pct": NEWS_MOVE_THRESHOLD_PCT}
+
+
 @app.get("/api/status")
 async def status():
     return {
@@ -1173,6 +1275,17 @@ async def signals(group: str = "core"):
 
     positions = await loop.run_in_executor(None, ibkr.get_portfolio)
     position_map = {p["symbol"]: p for p in positions if p["asset_type"] == "STK"}
+
+    # Overlay entry-anchored exit levels from logged trades (IBKR has no stops)
+    open_trades = db.fetch(
+        "SELECT symbol, entry_date, stop_loss, profit_target FROM trades WHERE exit_price IS NULL"
+    )
+    for row in open_trades:
+        pos = position_map.get(row["symbol"])
+        if pos is not None:
+            pos.setdefault("entry_date", row.get("entry_date"))
+            pos["stop_loss"] = row.get("stop_loss")
+            pos["profit_target"] = row.get("profit_target")
 
     if group == "quantum":
         base_symbols = QUANTUM_WATCHLIST
@@ -1653,14 +1766,27 @@ async def get_trades():
 @app.post("/api/trades")
 async def add_trade(trade: TradeIn):
     symbol = trade.symbol.upper()
-    db.mutate(
-        "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes, strategy) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (symbol, trade.shares, trade.entry_date, trade.entry_price, trade.signal_reason, trade.notes, trade.strategy),
-    )
     loop = asyncio.get_event_loop()
     analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+
+    # Freeze exit levels at entry: ATR stop off the entry price (current ATR is
+    # the best available estimate at logging time), capped at the max-stop rule.
+    entry = trade.entry_price
+    if analysis and analysis.get("atr"):
+        stop = max(entry - STOP_ATR_MULT * analysis["atr"], entry * (1 - STOP_MAX_PCT))
+    else:
+        stop = entry * (1 - STOP_MAX_PCT)
+    target = entry + PROFIT_RATIO * (entry - stop)
+
+    db.mutate(
+        "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes, strategy, stop_loss, profit_target) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (symbol, trade.shares, trade.entry_date, entry, trade.signal_reason, trade.notes, trade.strategy,
+         round(stop, 4), round(target, 4)),
+    )
+    db.add_price_alert(symbol, round(stop, 4), "below")
+    db.add_price_alert(symbol, round(target, 4), "above")
     telegram_bot.send(telegram_bot.format_trade_entry(
-        symbol, trade.shares, trade.entry_price, trade.entry_date, analysis
+        symbol, trade.shares, entry, trade.entry_date, analysis
     ))
     return {"status": "ok"}
 

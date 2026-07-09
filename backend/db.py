@@ -122,6 +122,29 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS news_digest (
+            id          SERIAL PRIMARY KEY,
+            symbol      TEXT NOT NULL,
+            move_date   TEXT NOT NULL,
+            pct_change  REAL NOT NULL,
+            price       REAL NOT NULL,
+            headlines   TEXT NOT NULL,
+            created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(symbol, move_date)
+        )
+    """ if _USE_PG else """
+        CREATE TABLE IF NOT EXISTS news_digest (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT NOT NULL,
+            move_date   TEXT NOT NULL,
+            pct_change  REAL NOT NULL,
+            price       REAL NOT NULL,
+            headlines   TEXT NOT NULL,
+            created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(symbol, move_date)
+        )
+    """)
     conn.commit()
 
     # Migration: add long_strike to options_trades for pre-existing DBs
@@ -148,6 +171,39 @@ def init_db():
             cur.execute("ALTER TABLE trades ADD COLUMN peak_price REAL")
         if "strategy" not in trade_cols:
             cur.execute("ALTER TABLE trades ADD COLUMN strategy TEXT DEFAULT 'A'")
+    conn.commit()
+
+    # Migration: entry-anchored exit levels. Stops/targets must be frozen at entry,
+    # not recomputed from the current price (which made exit checks unreachable).
+    if _USE_PG:
+        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS stop_loss REAL")
+        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS profit_target REAL")
+    else:
+        cur.execute("PRAGMA table_info(trades)")
+        trade_cols = {row[1] for row in cur.fetchall()}
+        if "stop_loss" not in trade_cols:
+            cur.execute("ALTER TABLE trades ADD COLUMN stop_loss REAL")
+        if "profit_target" not in trade_cols:
+            cur.execute("ALTER TABLE trades ADD COLUMN profit_target REAL")
+    # Backfill open legacy trades with the max-stop rule (8% stop, 2:1 target).
+    # ATR at entry is unknowable retroactively; this is the conservative bound.
+    cur.execute(
+        "UPDATE trades SET stop_loss = entry_price * 0.92, profit_target = entry_price * 1.16 "
+        "WHERE exit_price IS NULL AND stop_loss IS NULL"
+    )
+    conn.commit()
+
+    # Last-sent signal per (strategy, symbol) — persisted so Railway redeploys
+    # don't re-fire every active signal on Telegram.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS signal_state (
+            strategy   TEXT NOT NULL,
+            symbol     TEXT NOT NULL,
+            action     TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (strategy, symbol)
+        )
+    """)
     conn.commit()
 
     cur.close()
@@ -237,3 +293,68 @@ def remove_price_alert(alert_id: int) -> bool:
         return False
     mutate("DELETE FROM price_alerts WHERE id=?", (alert_id,))
     return True
+
+
+# ── Signal state ──────────────────────────────────────────────────────────────
+
+def load_signal_state(strategy: str) -> dict[str, str]:
+    rows = fetch("SELECT symbol, action FROM signal_state WHERE strategy=?", (strategy,))
+    return {r["symbol"]: r["action"] for r in rows}
+
+
+def save_signal_state(strategy: str, symbol: str, action: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    if _USE_PG:
+        cur.execute(
+            "INSERT INTO signal_state (strategy, symbol, action, updated_at) "
+            "VALUES (%s, %s, %s, CURRENT_TIMESTAMP) "
+            "ON CONFLICT (strategy, symbol) DO UPDATE SET action = EXCLUDED.action, updated_at = CURRENT_TIMESTAMP",
+            (strategy, symbol, action),
+        )
+    else:
+        cur.execute(
+            "INSERT INTO signal_state (strategy, symbol, action, updated_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT (strategy, symbol) DO UPDATE SET action = excluded.action, updated_at = CURRENT_TIMESTAMP",
+            (strategy, symbol, action),
+        )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ── News digest ───────────────────────────────────────────────────────────────
+
+def has_news_digest(symbol: str, move_date: str) -> bool:
+    row = fetchone(
+        "SELECT id FROM news_digest WHERE symbol=? AND move_date=?", (symbol, move_date)
+    )
+    return row is not None
+
+
+def add_news_digest(symbol: str, move_date: str, pct_change: float, price: float, headlines: str) -> None:
+    """headlines is a JSON string. Ignores the insert if (symbol, move_date) already exists."""
+    conn = get_conn()
+    cur = conn.cursor()
+    if _USE_PG:
+        cur.execute(
+            "INSERT INTO news_digest (symbol, move_date, pct_change, price, headlines) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (symbol, move_date) DO NOTHING",
+            (symbol, move_date, pct_change, price, headlines),
+        )
+    else:
+        cur.execute(
+            "INSERT OR IGNORE INTO news_digest (symbol, move_date, pct_change, price, headlines) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (symbol, move_date, pct_change, price, headlines),
+        )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_news_digest(limit: int = 30) -> list[dict]:
+    return fetch(
+        "SELECT * FROM news_digest ORDER BY move_date DESC, created_at DESC LIMIT ?", (limit,)
+    )
