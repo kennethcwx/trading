@@ -113,6 +113,31 @@ def get_market_regime() -> dict:
     }
 
 
+def get_crypto_regime(equity_regime: dict) -> dict:
+    """Crypto-native regime: BTC vs its own 200-day SMA. SPY's trend says little
+    about crypto — gating BTC entries on the S&P was blocking valid setups.
+    Carries the equity regime's VIX and FX fields through for sizing/formatting."""
+    hist = _fetch_history("BTC-USD")
+    close = hist["Close"].dropna() if not hist.empty else hist
+    if close is None or len(close) < SMA_LONG:
+        return equity_regime   # no BTC data — fall back rather than block
+
+    sma200 = float(close.rolling(SMA_LONG).mean().iloc[-1])
+    price = float(close.iloc[-1])
+    if pd.isna(sma200) or pd.isna(price):
+        return equity_regime
+    regime_ok = price > sma200
+
+    return {
+        **equity_regime,
+        "regime_ok": regime_ok,
+        "regime": "BULLISH" if regime_ok else "BEARISH",
+        "basis": "BTC",
+        "btc_price": round(price, 2),
+        "btc_sma200": round(sma200, 2),
+    }
+
+
 def get_ticker_analysis(symbol: str) -> dict | None:
     hist = _fetch_history(symbol)
     hist = hist.dropna(subset=["Close"]) if not hist.empty else hist

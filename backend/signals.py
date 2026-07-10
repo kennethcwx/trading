@@ -83,8 +83,9 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
 
     # ── ENTRY signals (watchlist) ─────────────────────────────────────────
     if not regime_ok:
+        basis = regime.get("basis", "SPY")
         return _signal("SKIP", "LOW",
-                       ["Market regime BEARISH (SPY < 200 SMA) — no new longs"],
+                       [f"Market regime BEARISH ({basis} < 200 SMA) — no new longs"],
                        "Wait for regime to recover or trade with 50% size")
 
     if earnings_warning:

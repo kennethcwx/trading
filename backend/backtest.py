@@ -813,6 +813,186 @@ def _report_walkforward(results: dict[str, list[dict]], n_windows: int):
     print(f"\n{'='*W}\n")
 
 
+# ── Portfolio simulation ─────────────────────────────────────────────────────
+#
+# Per-trade expectancy ignores capital: with S$5k, 1% risk and a 10% position
+# cap, many signals can't be taken. This simulates the actual account day by
+# day — shared cash pool, risk-based sizing, cash floor — and reports the
+# equity curve, CAGR and max drawdown per variant.
+
+PF_START_SGD   = 5000
+PF_SGD_TO_USD  = 0.74     # fixed FX — SGD/USD drift is noise at this scale
+PF_RISK_PCT    = 0.01     # risk 1% of current equity per trade
+PF_MAX_POS_PCT = 0.10     # max 10% of equity per position
+PF_MIN_CASH_PCT = 0.10    # keep 10% of equity in cash
+PF_COST = SLIPPAGE_PCT + COMMISSION_PCT   # applied to each fill
+
+
+def _run_portfolio(prepared_dfs: dict[str, pd.DataFrame], entry_fn, filters_fn) -> dict:
+    start_usd = PF_START_SGD * PF_SGD_TO_USD
+    cash = start_usd
+    positions: dict[str, dict] = {}
+    closed: list[dict] = []
+    skipped_capital = 0
+    exposure_days = 0
+
+    # Union trading calendar; per-symbol first tradable index after warmup
+    calendars = {s: df.index for s, df in prepared_dfs.items()}
+    warmup_start = {s: idx[min(SMA_LONG, len(idx) - 1)] for s, idx in calendars.items()}
+    all_dates = sorted(set().union(*[set(idx) for idx in calendars.values()]))
+
+    equity_curve: list[tuple] = []
+
+    def _close(sym, pos, exit_px, frac, reason, date):
+        nonlocal cash
+        fill = exit_px * (1 - PF_COST)
+        qty = pos["shares"] * frac
+        cash += qty * fill
+        closed.append({
+            "symbol": sym, "reason": reason,
+            "pnl_pct": (fill - pos["fill_price"]) / pos["fill_price"] * 100,
+            "pnl_usd": qty * (fill - pos["fill_price"]),
+            "days_held": (date - pos["entry_date"]).days,
+        })
+
+    for date in all_dates:
+        # mark-to-market equity (yesterday's close basis is fine intraday)
+        mtm = sum(
+            pos["shares"] * float(prepared_dfs[s].loc[date, "Close"])
+            if date in calendars[s] else pos["shares"] * pos["last_close"]
+            for s, pos in positions.items()
+        )
+        equity = cash + mtm
+
+        # ── exits first (mirrors _run) ──
+        for sym in list(positions.keys()):
+            if date not in calendars[sym]:
+                continue
+            row = prepared_dfs[sym].loc[date]
+            pos = positions[sym]
+            pos["last_close"] = float(row["Close"])
+            price   = float(row["Close"])
+            low_px  = float(row["Low"])
+            high_px = float(row["High"])
+            open_px = float(row["Open"])
+            rsi_val = float(row["rsi"])
+            above200 = price > float(row["sma200"])
+            ep, stop, tgt = pos["entry_price"], pos["stop"], pos["target"]
+            weeks = (date - pos["entry_date"]).days / 7
+
+            if low_px <= stop:
+                _close(sym, pos, min(open_px, stop), 1.0, "stop_hit", date)
+                del positions[sym]
+            elif not above200:
+                _close(sym, pos, price, 1.0, "trend_break", date)
+                del positions[sym]
+            elif not pos["sold_half"]:
+                if rsi_val > RSI_EXIT and price > ep:
+                    _close(sym, pos, price, 0.5, "rsi_half", date)
+                    pos["shares"] *= 0.5; pos["sold_half"] = True; pos["stop"] = ep
+                elif high_px >= tgt:
+                    _close(sym, pos, max(open_px, tgt), 0.5, "target_half", date)
+                    pos["shares"] *= 0.5; pos["sold_half"] = True; pos["stop"] = ep
+                elif weeks >= MAX_HOLD_WEEKS and (price - ep) / ep * 100 < 5:
+                    _close(sym, pos, price, 1.0, "time_stop", date)
+                    del positions[sym]
+            else:
+                pos["peak"] = max(pos["peak"], price)
+                gain = (price - ep) / ep
+                if gain >= TRAILING_TRIGGER and low_px <= pos["peak"] * (1 - TRAILING_STOP_PCT):
+                    _close(sym, pos, min(open_px, pos["peak"] * (1 - TRAILING_STOP_PCT)), 1.0, "trail_stop", date)
+                    del positions[sym]
+                elif weeks >= MAX_HOLD_WEEKS and gain * 100 < 5:
+                    _close(sym, pos, price, 1.0, "time_stop", date)
+                    del positions[sym]
+
+        # ── entries: collect today's candidates, best RS rank first ──
+        candidates = []
+        for sym, df in prepared_dfs.items():
+            if sym in positions or date not in calendars[sym] or date < warmup_start[sym]:
+                continue
+            sector_s, rs_s, _rs3m, _vix = filters_fn(sym)
+            if rs_s is not None and date in rs_s.index and float(rs_s[date]) < 75:
+                continue
+            if sector_s is not None and date in sector_s.index and not bool(sector_s[date]):
+                continue
+            row = df.loc[date]
+            sig, stop = entry_fn(row)
+            if sig and float(row["Close"]) - stop > 0:
+                rank = float(rs_s[date]) if rs_s is not None and date in rs_s.index else 0.0
+                candidates.append((rank, sym, row, sig, stop))
+
+        for rank, sym, row, sig, stop in sorted(candidates, key=lambda c: -c[0]):
+            price = float(row["Close"])
+            equity = cash + sum(
+                p["shares"] * p["last_close"] for p in positions.values()
+            )
+            risk_usd = equity * PF_RISK_PCT
+            shares = risk_usd / (price - stop)
+            pos_value = min(shares * price, equity * PF_MAX_POS_PCT)
+            cash_floor = equity * PF_MIN_CASH_PCT
+            if cash - pos_value < cash_floor:
+                pos_value = cash - cash_floor
+            if pos_value < price * 0.05 or pos_value <= 0:   # too small to matter
+                skipped_capital += 1
+                continue
+            shares = pos_value / price
+            fill = price * (1 + PF_COST)
+            cash -= shares * fill
+            positions[sym] = {
+                "shares": shares, "entry_price": price, "fill_price": fill,
+                "stop": stop, "target": price + PROFIT_RATIO * (price - stop),
+                "sold_half": False, "peak": price, "entry_date": date,
+                "last_close": price,
+            }
+
+        if positions:
+            exposure_days += 1
+        mtm = sum(p["shares"] * p["last_close"] for p in positions.values())
+        equity_curve.append((date, cash + mtm))
+
+    # liquidate remainder at last close
+    for sym, pos in list(positions.items()):
+        _close(sym, pos, pos["last_close"], 1.0, "open_mtm", all_dates[-1])
+
+    eq = pd.Series({d: v for d, v in equity_curve})
+    peak = eq.cummax()
+    max_dd = float(((eq - peak) / peak).min()) * 100
+    end = float(eq.iloc[-1])
+    years = (all_dates[-1] - all_dates[0]).days / 365.25
+    cagr = ((end / start_usd) ** (1 / years) - 1) * 100 if years > 0 else 0.0
+    wins = [t for t in closed if t["pnl_usd"] > 0]
+
+    return {
+        "end_equity_sgd": end / PF_SGD_TO_USD,
+        "total_return": (end / start_usd - 1) * 100,
+        "cagr": cagr,
+        "max_dd": max_dd,
+        "trades": len(closed),
+        "win_rate": len(wins) / len(closed) * 100 if closed else 0.0,
+        "skipped_capital": skipped_capital,
+        "exposure_pct": exposure_days / len(all_dates) * 100,
+    }
+
+
+def _report_portfolio(results: dict[str, dict], years_label: str):
+    W = 96
+    print(f"\n{'='*W}")
+    print(f"  PORTFOLIO SIMULATION — S${PF_START_SGD} start, {PF_RISK_PCT*100:.0f}% risk/trade, "
+          f"{PF_MAX_POS_PCT*100:.0f}% max position, {PF_MIN_CASH_PCT*100:.0f}% cash floor ({years_label})")
+    print(f"{'='*W}")
+    print(f"  {'Variant':<17}{'End S$':>9}{'TotRet':>9}{'CAGR':>8}{'MaxDD':>8}"
+          f"{'Trades':>8}{'WR%':>6}{'Skipped':>9}{'Exposure':>10}")
+    print(f"  {'-'*90}")
+    for vname, m in results.items():
+        print(f"  {vname:<17}{m['end_equity_sgd']:>9.0f}{m['total_return']:>+8.1f}%{m['cagr']:>+7.1f}%"
+              f"{m['max_dd']:>+7.1f}%{m['trades']:>8}{m['win_rate']:>5.0f}%"
+              f"{m['skipped_capital']:>9}{m['exposure_pct']:>9.0f}%")
+    best = max(results.items(), key=lambda kv: kv[1]["cagr"])
+    print(f"\n  Best CAGR: {best[0]}  {best[1]['cagr']:+.1f}%/yr  (max drawdown {best[1]['max_dd']:+.1f}%)")
+    print(f"{'='*W}\n")
+
+
 # ── Diagnostic report ────────────────────────────────────────────────────────
 
 def _report_diagnose(all_trades: list[dict]):
@@ -910,12 +1090,14 @@ def main():
                         help="Run MEAN_REV_ONLY on validate window, tag trades by filter, show diagnostic report")
     parser.add_argument("--walkforward", action="store_true",
                         help="Run all variants over consecutive 6-month windows (5y data) — judge on pooled expectancy + consistency")
+    parser.add_argument("--portfolio",  action="store_true",
+                        help="Simulate the actual S$5k account (shared capital, risk sizing, cash floor) per variant on 5y data")
     parser.add_argument("--windows",    type=int, default=8,
                         help="Number of walk-forward windows (default 8 = ~4 years of entries)")
     args = parser.parse_args()
 
     symbols = args.symbols or UNIVERSE
-    period = "5y" if args.walkforward else "3y"
+    period = "5y" if (args.walkforward or args.portfolio) else "3y"
 
     # ── Pass 1: fetch and prepare all symbols ────────────────────────────────
     print(f"\nFetching {len(symbols)} symbols ({period})…")
@@ -965,7 +1147,19 @@ def main():
         )
 
     # ── Pass 2: run backtest ──────────────────────────────────────────────────
-    if args.walkforward:
+    if args.portfolio:
+        print(f"\nRunning portfolio simulation ({len(VARIANTS)} variants)…")
+        pf_results: dict[str, dict] = {}
+        for vname, entry_fn in VARIANTS.items():
+            sys.stdout.write(f"  {vname:<17} … ")
+            sys.stdout.flush()
+            pf_results[vname] = _run_portfolio(prepared_dfs, entry_fn, _filters)
+            print(f"end S${pf_results[vname]['end_equity_sgd']:.0f}")
+        span = next(iter(prepared_dfs.values())).index
+        years_label = f"{span[0].date()} to {span[-1].date()}"
+        _report_portfolio(pf_results, years_label)
+
+    elif args.walkforward:
         print(f"\nRunning walk-forward: {args.windows} × {WF_WINDOW_DAYS}d entry windows, "
               f"{len(VARIANTS)} variants, filters {'off' if args.no_filters else 'on'}…")
         results = _run_walkforward(prepared_dfs, args.windows, _filters)

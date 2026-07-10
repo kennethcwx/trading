@@ -20,7 +20,7 @@ import futu_broker
 import db
 import telegram_bot
 import news
-from analysis import get_market_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, invalidate_cache
+from analysis import get_market_regime, get_crypto_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, invalidate_cache
 from signals import generate_signal, calculate_position_size
 from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO
 
@@ -84,6 +84,39 @@ def _compute_rs_ranks(stock_data: list[dict]) -> dict[str, int]:
     sorted_rs = sorted(rs_entries, key=lambda x: x[1])
     n = len(sorted_rs)
     return {sym: round((i / (n - 1)) * 100) for i, (sym, _) in enumerate(sorted_rs)}
+
+
+_screener_rs_ranks: dict[str, int] = {}
+
+
+async def rs_rank_refresher():
+    """Hourly RS ranks against the 70-symbol screener universe. Ranking within
+    the ~8-symbol watchlist made 'top 25%' nearly meaningless (top 2 of 8) and
+    diverged from the backtest; a wide universe gives honest percentiles."""
+    await asyncio.sleep(20)
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            sem = asyncio.Semaphore(10)
+
+            async def _rs(symbol: str):
+                async with sem:
+                    rs = await loop.run_in_executor(None, get_relative_strength, symbol)
+                    return symbol, (rs or {}).get("rs_3m")
+
+            pairs = await asyncio.gather(*[_rs(s) for s in SCREENER_UNIVERSE])
+            entries = [(s, v) for s, v in pairs if v is not None]
+            if len(entries) > 1:
+                ranked = sorted(entries, key=lambda x: x[1])
+                n = len(ranked)
+                _screener_rs_ranks.clear()
+                _screener_rs_ranks.update(
+                    {sym: round(i / (n - 1) * 100) for i, (sym, _) in enumerate(ranked)}
+                )
+                logging.info(f"RS ranks refreshed over {n} screener symbols")
+        except Exception as e:
+            logging.warning(f"RS rank refresher error: {e}")
+        await asyncio.sleep(60 * 60)
 
 
 def _market_is_open() -> bool:
@@ -158,7 +191,9 @@ async def signal_watcher():
             for d in stock_data:
                 symbol = d["symbol"]
                 position = position_map.get(symbol)
-                rs_rank = rs_rank_map.get(symbol)
+                # Prefer the wide screener-universe rank; watchlist-local rank is
+                # a poor percentile with so few symbols
+                rs_rank = _screener_rs_ranks.get(symbol, rs_rank_map.get(symbol))
                 sector_ok = d["sector_status"].get("above_200sma") if d["sector_status"] else None
 
                 signal = generate_signal(
@@ -327,13 +362,21 @@ async def _build_crypto_snapshot(regime: dict, sgd_to_usd: float) -> list[dict]:
         pos_size = None
         if action == "BUY" and not position:
             price = d["analysis"]["price"]
-            qty = round(CRYPTO_POSITION_SGD * sgd_to_usd / price, 6)
+            stop = d["analysis"]["stop_loss"]
+            # Risk-based sizing like stocks (1% of portfolio at the stop),
+            # capped at the crypto allocation limit
+            dist = price - stop
+            risk_usd = PORTFOLIO_SIZE_SGD * sgd_to_usd * RISK_PER_TRADE_PCT
+            cap_usd = CRYPTO_POSITION_SGD * sgd_to_usd
+            value_usd = min(risk_usd / dist * price, cap_usd) if dist > 0 else cap_usd
+            qty = round(value_usd / price, 6)
+            actual_risk_sgd = round(qty * dist / sgd_to_usd, 2) if dist > 0 else None
             pos_size = {
                 "shares": qty,
-                "position_value_sgd": CRYPTO_POSITION_SGD,
-                "position_value_usd": round(CRYPTO_POSITION_SGD * sgd_to_usd, 2),
-                "risk_sgd": None,
-                "note": f"Fixed S${CRYPTO_POSITION_SGD} allocation",
+                "position_value_sgd": round(value_usd / sgd_to_usd, 2),
+                "position_value_usd": round(value_usd, 2),
+                "risk_sgd": actual_risk_sgd,
+                "note": f"Risk-based (1% at stop), capped at S${CRYPTO_POSITION_SGD}",
             }
         rows.append({
             "symbol": symbol,
@@ -357,6 +400,8 @@ async def crypto_watcher():
     while True:
         try:
             regime = await loop.run_in_executor(None, get_market_regime)
+            # Crypto entries gate on BTC's own 200 SMA, not the S&P's
+            regime = await loop.run_in_executor(None, get_crypto_regime, regime)
             sgd_to_usd = regime.get("sgd_to_usd", 0.74)
             rows = await _build_crypto_snapshot(regime, sgd_to_usd)
 
@@ -1130,6 +1175,7 @@ async def lifespan(app: FastAPI):
         logging.warning(f"Could not restore signal state: {e}")
     ibkr.connect_background(paper=True)
     watcher = asyncio.create_task(signal_watcher())
+    rs_refresher = asyncio.create_task(rs_rank_refresher())
     crypto = asyncio.create_task(crypto_watcher())
     sgx = asyncio.create_task(sgx_watcher())
     news_task = asyncio.create_task(news_watcher())
@@ -1273,6 +1319,8 @@ async def portfolio():
 async def signals(group: str = "core"):
     loop = asyncio.get_event_loop()
     regime = await loop.run_in_executor(None, get_market_regime)
+    if group == "crypto":
+        regime = await loop.run_in_executor(None, get_crypto_regime, regime)
     sgd_to_usd = regime.get("sgd_to_usd", 0.74)
     size_mult = regime.get("new_position_size_multiplier", 1.0)
 
