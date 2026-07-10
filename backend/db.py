@@ -193,6 +193,18 @@ def init_db():
     )
     conn.commit()
 
+    # Migration: tag alert origin so stale auto-registered alerts (from BUY
+    # signals whose trades were never taken) can be pruned without touching
+    # alerts the user set manually.
+    if _USE_PG:
+        cur.execute("ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual'")
+    else:
+        cur.execute("PRAGMA table_info(price_alerts)")
+        alert_cols = {row[1] for row in cur.fetchall()}
+        if "source" not in alert_cols:
+            cur.execute("ALTER TABLE price_alerts ADD COLUMN source TEXT DEFAULT 'manual'")
+    conn.commit()
+
     # Last-sent signal per (strategy, symbol) — persisted so Railway redeploys
     # don't re-fire every active signal on Telegram.
     cur.execute("""
@@ -269,13 +281,13 @@ def get_price_alerts() -> list[dict]:
     return fetch("SELECT * FROM price_alerts ORDER BY id")
 
 
-def add_price_alert(symbol: str, target: float, direction: str) -> int:
+def add_price_alert(symbol: str, target: float, direction: str, source: str = "manual") -> int:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        f"INSERT INTO price_alerts (symbol, target, direction) VALUES ({_ph()}, {_ph()}, {_ph()})"
+        f"INSERT INTO price_alerts (symbol, target, direction, source) VALUES ({_ph()}, {_ph()}, {_ph()}, {_ph()})"
         + (" RETURNING id" if _USE_PG else ""),
-        (symbol, target, direction),
+        (symbol, target, direction, source),
     )
     if _USE_PG:
         new_id = cur.fetchone()["id"]
@@ -293,6 +305,32 @@ def remove_price_alert(alert_id: int) -> bool:
         return False
     mutate("DELETE FROM price_alerts WHERE id=?", (alert_id,))
     return True
+
+
+def prune_stale_auto_alerts(days: int = 14) -> int:
+    """Delete auto-registered alerts older than `days` whose symbol has no open
+    trade — BUY signals register stop/target alerts even if the trade is never
+    taken, and those otherwise fire forever. Manual alerts are never touched."""
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    stale = fetch(
+        "SELECT id FROM price_alerts WHERE source = 'auto' AND created_at < ? "
+        "AND symbol NOT IN (SELECT symbol FROM trades WHERE exit_price IS NULL)",
+        (cutoff,),
+    )
+    for row in stale:
+        mutate("DELETE FROM price_alerts WHERE id=?", (row["id"],))
+    return len(stale)
+
+
+def remove_trade_alerts(symbol: str) -> None:
+    """Drop stop/target alerts for a symbol after its trade closes (only if no
+    other open trade holds that symbol). Manual alerts are kept."""
+    still_open = fetchone(
+        "SELECT id FROM trades WHERE symbol=? AND exit_price IS NULL", (symbol,)
+    )
+    if not still_open:
+        mutate("DELETE FROM price_alerts WHERE symbol=? AND source IN ('auto', 'trade')", (symbol,))
 
 
 # ── Signal state ──────────────────────────────────────────────────────────────

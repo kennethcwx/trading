@@ -178,8 +178,8 @@ async def signal_watcher():
                         # Auto-register stop and target price alerts
                         stop  = d["analysis"]["stop_loss"]
                         target = d["analysis"]["profit_target"]
-                        db.add_price_alert(symbol, stop, "below")
-                        db.add_price_alert(symbol, target, "above")
+                        db.add_price_alert(symbol, stop, "below", source="auto")
+                        db.add_price_alert(symbol, target, "above", source="auto")
                         logging.info(f"Auto-alerts set for {symbol}: SL ${stop:.2f} / TP ${target:.2f}")
 
                     if action == "SELL_HALF":
@@ -265,7 +265,10 @@ async def signal_watcher():
                     )
                     db.mutate("UPDATE trades SET half_sold = 2 WHERE id = ?", (trade["id"],))
 
-            # Price alerts
+            # Price alerts — first drop stale auto alerts from untaken BUY signals
+            pruned = db.prune_stale_auto_alerts()
+            if pruned:
+                logging.info(f"Pruned {pruned} stale auto price alerts")
             for alert in db.get_price_alerts():
                 analysis = await loop.run_in_executor(None, get_ticker_analysis, alert["symbol"])
                 if not analysis:
@@ -371,8 +374,8 @@ async def crypto_watcher():
                         telegram_bot.send(msg)
                         stop   = r["analysis"]["stop_loss"]
                         target = r["analysis"]["profit_target"]
-                        db.add_price_alert(symbol, stop, "below")
-                        db.add_price_alert(symbol, target, "above")
+                        db.add_price_alert(symbol, stop, "below", source="auto")
+                        db.add_price_alert(symbol, target, "above", source="auto")
 
                     # Immediate alert: exit signal on a held position — don't wait for digest
                     elif r["position"] and action in ("SELL", "SELL_HALF", "REVIEW"):
@@ -460,8 +463,8 @@ async def sgx_watcher():
                                              "SGX Auto-BUY", f"Futu order {order_id}", "SGX",
                                              d["analysis"]["stop_loss"], d["analysis"]["profit_target"]),
                                         )
-                                        db.add_price_alert(yf_sym, d["analysis"]["stop_loss"],     "below")
-                                        db.add_price_alert(yf_sym, d["analysis"]["profit_target"], "above")
+                                        db.add_price_alert(yf_sym, d["analysis"]["stop_loss"],     "below", source="trade")
+                                        db.add_price_alert(yf_sym, d["analysis"]["profit_target"], "above", source="trade")
 
                         elif action in ("SELL", "SELL_HALF") and position:
                             shares = position["shares"]
@@ -1783,8 +1786,8 @@ async def add_trade(trade: TradeIn):
         (symbol, trade.shares, trade.entry_date, entry, trade.signal_reason, trade.notes, trade.strategy,
          round(stop, 4), round(target, 4)),
     )
-    db.add_price_alert(symbol, round(stop, 4), "below")
-    db.add_price_alert(symbol, round(target, 4), "above")
+    db.add_price_alert(symbol, round(stop, 4), "below", source="trade")
+    db.add_price_alert(symbol, round(target, 4), "above", source="trade")
     telegram_bot.send(telegram_bot.format_trade_entry(
         symbol, trade.shares, entry, trade.entry_date, analysis
     ))
@@ -1803,6 +1806,7 @@ async def close_trade(trade_id: int, close: TradeClose):
         "UPDATE trades SET exit_date=?, exit_price=?, notes=? WHERE id=?",
         (close.exit_date, close.exit_price, close.notes, trade_id),
     )
+    db.remove_trade_alerts(symbol)
     loop = asyncio.get_event_loop()
     regime = await loop.run_in_executor(None, get_market_regime)
     sgd_to_usd = regime.get("sgd_to_usd", 0.74)

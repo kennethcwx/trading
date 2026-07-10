@@ -90,9 +90,9 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) ->
 
 # ── Data preparation ──────────────────────────────────────────────────────────
 
-def _prepare(symbol: str) -> pd.DataFrame | None:
+def _prepare(symbol: str, period: str = "3y") -> pd.DataFrame | None:
     try:
-        df = yf.Ticker(symbol).history(period="3y", auto_adjust=True)
+        df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
     except Exception as e:
         print(f"  {symbol}: fetch error — {e}", file=sys.stderr)
         return None
@@ -128,21 +128,21 @@ def _prepare(symbol: str) -> pd.DataFrame | None:
 
 # ── Live-system filters (RS rank + sector ETF) ───────────────────────────────
 
-def _fetch_vix() -> pd.Series:
-    """Returns VIX close price indexed by date (3y history)."""
+def _fetch_vix(period: str = "3y") -> pd.Series:
+    """Returns VIX close price indexed by date."""
     try:
-        df = yf.Ticker("^VIX").history(period="3y", auto_adjust=True)
+        df = yf.Ticker("^VIX").history(period=period, auto_adjust=True)
         return df["Close"].dropna() if not df.empty else pd.Series(dtype=float)
     except Exception:
         return pd.Series(dtype=float)
 
 
-def _fetch_sector_above_200(etfs: set[str]) -> dict[str, pd.Series]:
+def _fetch_sector_above_200(etfs: set[str], period: str = "3y") -> dict[str, pd.Series]:
     """Returns {etf: Series[bool]} — True on dates when sector ETF is above 200 SMA."""
     out: dict[str, pd.Series] = {}
     for etf in etfs:
         try:
-            df = yf.Ticker(etf).history(period="3y", auto_adjust=True)
+            df = yf.Ticker(etf).history(period=period, auto_adjust=True)
         except Exception:
             continue
         if df.empty or len(df) < SMA_LONG:
@@ -340,12 +340,62 @@ def _entry_mean_rev_rsi35(row) -> tuple[str | None, float]:
     return None, 0.0
 
 
+def _entry_no_rsi_cap(row) -> tuple[str | None, float]:
+    """BASELINE but momentum has no RSI < 70 ceiling — tests whether excluding
+    the strongest breakouts (which often print RSI > 70) costs performance."""
+    price = float(row["Close"])
+    if price <= row["sma200"]:
+        return None, 0.0
+    rsi_val = float(row["rsi"])
+    atr_val = float(row["atr"])
+    stop    = max(price - STOP_ATR_MULT * atr_val, price * (1 - STOP_MAX_PCT))
+
+    mean_rev = rsi_val < RSI_ENTRY
+    momentum = (
+        price >= row["don_upper"]
+        and float(row["vol_ratio"]) >= VOLUME_MULTIPLIER
+        and rsi_val > RSI_ENTRY
+    )
+    if mean_rev:
+        return "MEAN_REV", stop
+    if momentum:
+        return "MOMENTUM", stop
+    return None, 0.0
+
+
+def _entry_swing_low_no_cap(row) -> tuple[str | None, float]:
+    """SWING_LOW stops + no RSI ceiling on momentum — combines the two best ideas."""
+    price = float(row["Close"])
+    if price <= row["sma200"]:
+        return None, 0.0
+    rsi_val    = float(row["rsi"])
+    atr_val    = float(row["atr"])
+    swing_low  = float(row["swing_low"])
+    raw_stop   = swing_low - 0.5 * atr_val
+    stop       = max(raw_stop, price * (1 - STOP_MAX_PCT))
+    stop       = min(stop, price * (1 - 0.02))
+
+    mean_rev = rsi_val < RSI_ENTRY
+    momentum = (
+        price >= row["don_upper"]
+        and float(row["vol_ratio"]) >= VOLUME_MULTIPLIER
+        and rsi_val > RSI_ENTRY
+    )
+    if mean_rev:
+        return "MEAN_REV", stop
+    if momentum:
+        return "MOMENTUM", stop
+    return None, 0.0
+
+
 VARIANTS: dict[str, callable] = {
     "BASELINE":        _entry_baseline,
     "SMA_CROSS":       _entry_sma_cross,
     "DONCHIAN_STOP":   _entry_donchian_stop,
     "COMBINED":        _entry_combined,
     "SWING_LOW":       _entry_swing_low,
+    "NO_RSI_CAP":      _entry_no_rsi_cap,
+    "SWING_LOW_NOCAP": _entry_swing_low_no_cap,
     "MEAN_REV_ONLY":   _entry_mean_rev_only,
     "MEAN_REV_SMA50":  _entry_mean_rev_sma50,
     "MEAN_REV_RSI35":  _entry_mean_rev_rsi35,
@@ -677,6 +727,92 @@ def _report_compare(results: dict[str, dict[str, list[dict]]]):
     print(f"\n{'='*W}\n")
 
 
+# ── Walk-forward validation ──────────────────────────────────────────────────
+#
+# The single train/validate split picks a "winner" from one 6-month window —
+# far too regime-dependent. Walk-forward runs every variant over N consecutive
+# non-overlapping 6-month entry windows (oldest→newest) and judges variants on
+# pooled expectancy AND consistency (how many windows were positive).
+
+WF_WINDOW_DAYS = 182
+
+
+def _run_walkforward(prepared_dfs: dict[str, pd.DataFrame], n_windows: int,
+                     filters_fn) -> dict[str, list[dict]]:
+    """Returns {variant: [ {window metrics + trades}, ... ]} oldest window first."""
+    results: dict[str, list[dict]] = {v: [] for v in VARIANTS}
+    for w in range(n_windows - 1, -1, -1):      # oldest first
+        start_days = w * WF_WINDOW_DAYS
+        end_days   = (w + 1) * WF_WINDOW_DAYS
+        for vname, entry_fn in VARIANTS.items():
+            trades: list[dict] = []
+            for sym, df in prepared_dfs.items():
+                sector_s, rs_s, rs3m_s, _vix = filters_fn(sym)
+                trades.extend(_run(sym, df, entry_fn,
+                                   entry_start_days=start_days, entry_end_days=end_days,
+                                   sector_above_200=sector_s, rs_rank_series=rs_s,
+                                   rs3m_series=rs3m_s))
+            m = _metrics(trades, label=vname)
+            m["window"] = f"-{end_days}d…-{start_days}d"
+            results[vname].append(m)
+    return results
+
+
+def _report_walkforward(results: dict[str, list[dict]], n_windows: int):
+    W = 100
+    print(f"\n{'='*W}")
+    print(f"  WALK-FORWARD VALIDATION — {n_windows} consecutive {WF_WINDOW_DAYS}-day entry windows (oldest -> newest)")
+    print(f"  Cell = expectancy%/trade (closed legs). Judge on POOLED expectancy + consistency, not one window.")
+    print(f"{'='*W}")
+
+    win_labels = [m["window"] for m in next(iter(results.values()))]
+    header = f"  {'Variant':<17}" + "".join(f"{lbl:>15}" for lbl in win_labels) \
+             + f"{'Pooled':>10}{'Legs':>6}{'Win.wins':>9}"
+    print(header)
+    print(f"  {'-'*(len(header)-2)}")
+
+    summary = []
+    for vname, windows in results.items():
+        cells = []
+        total_legs = 0
+        pos_windows = 0
+        weighted = 0.0
+        for m in windows:
+            legs = m.get("legs", 0)
+            if legs == 0:
+                cells.append(f"{'—':>15}")
+                continue
+            exp = m["exp"]
+            total_legs += legs
+            weighted += exp * legs
+            if exp > 0:
+                pos_windows += 1
+            cells.append(f"{exp:>+9.2f} ({legs:>2})")
+        pooled = weighted / total_legs if total_legs else None
+        summary.append({"variant": vname, "pooled": pooled, "legs": total_legs,
+                        "pos": pos_windows, "windows_traded": sum(1 for m in windows if m.get('legs', 0) > 0)})
+        pooled_s = f"{pooled:>+9.2f}%" if pooled is not None else f"{'—':>10}"
+        print(f"  {vname:<17}" + "".join(cells) + pooled_s
+              + f"{total_legs:>6}" + f"{pos_windows:>5}/{summary[-1]['windows_traded']}")
+
+    qualified = [s for s in summary if s["pooled"] is not None and s["legs"] >= 20]
+    print(f"\n  Verdict (needs >=20 pooled legs):")
+    if not qualified:
+        print("  No variant has enough trades to qualify.")
+    else:
+        for s in sorted(qualified, key=lambda x: x["pooled"], reverse=True)[:3]:
+            consistency = f"{s['pos']}/{s['windows_traded']} windows positive"
+            print(f"    {s['variant']:<17} pooled {s['pooled']:+.2f}%/trade over {s['legs']} legs — {consistency}")
+        best = max(qualified, key=lambda x: x["pooled"])
+        steady = [s for s in qualified if s["windows_traded"] and s["pos"] / s["windows_traded"] >= 0.75]
+        if steady:
+            most_consistent = max(steady, key=lambda x: (x["pos"] / x["windows_traded"], x["pooled"]))
+            if most_consistent["variant"] != best["variant"]:
+                print(f"    NOTE: {best['variant']} has the best pooled number, but "
+                      f"{most_consistent['variant']} is more consistent across regimes.")
+    print(f"\n{'='*W}\n")
+
+
 # ── Diagnostic report ────────────────────────────────────────────────────────
 
 def _report_diagnose(all_trades: list[dict]):
@@ -772,17 +908,22 @@ def main():
                         help="Skip RS rank and sector ETF filters")
     parser.add_argument("--diagnose",   action="store_true",
                         help="Run MEAN_REV_ONLY on validate window, tag trades by filter, show diagnostic report")
+    parser.add_argument("--walkforward", action="store_true",
+                        help="Run all variants over consecutive 6-month windows (5y data) — judge on pooled expectancy + consistency")
+    parser.add_argument("--windows",    type=int, default=8,
+                        help="Number of walk-forward windows (default 8 = ~4 years of entries)")
     args = parser.parse_args()
 
     symbols = args.symbols or UNIVERSE
+    period = "5y" if args.walkforward else "3y"
 
     # ── Pass 1: fetch and prepare all symbols ────────────────────────────────
-    print(f"\nFetching {len(symbols)} symbols…")
+    print(f"\nFetching {len(symbols)} symbols ({period})…")
     prepared_dfs: dict[str, pd.DataFrame] = {}
     for sym in symbols:
         sys.stdout.write(f"  {sym:<6} … ")
         sys.stdout.flush()
-        df = _prepare(sym)
+        df = _prepare(sym, period=period)
         if df is None:
             print("skip")
             continue
@@ -807,11 +948,11 @@ def main():
         needed_etfs = {SECTOR_ETF_MAP[s] for s in prepared_dfs if s in SECTOR_ETF_MAP}
         if needed_etfs:
             print(f"Fetching sector ETFs ({', '.join(sorted(needed_etfs))})…", end=" ", flush=True)
-            sector_cache = _fetch_sector_above_200(needed_etfs)
+            sector_cache = _fetch_sector_above_200(needed_etfs, period=period)
             print("done")
 
         print("Fetching VIX…", end=" ", flush=True)
-        vix_series = _fetch_vix()
+        vix_series = _fetch_vix(period=period)
         print("done")
 
     def _filters(sym: str) -> tuple[pd.Series | None, pd.Series | None, pd.Series | None, pd.Series]:
@@ -824,7 +965,13 @@ def main():
         )
 
     # ── Pass 2: run backtest ──────────────────────────────────────────────────
-    if args.diagnose:
+    if args.walkforward:
+        print(f"\nRunning walk-forward: {args.windows} × {WF_WINDOW_DAYS}d entry windows, "
+              f"{len(VARIANTS)} variants, filters {'off' if args.no_filters else 'on'}…")
+        results = _run_walkforward(prepared_dfs, args.windows, _filters)
+        _report_walkforward(results, args.windows)
+
+    elif args.diagnose:
         print(f"\nRunning diagnostic (MEAN_REV_ONLY, validate window, filters + VIX tagged)…\n")
         all_trades: list[dict] = []
         for sym, df in prepared_dfs.items():
