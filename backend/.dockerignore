@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pem
+*.db
+.env
+venv/
+.venv/
+Procfile
+railway.toml
+runtime.txt
