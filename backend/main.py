@@ -1264,6 +1264,14 @@ async def news_feed():
     return {"items": rows, "threshold_pct": NEWS_MOVE_THRESHOLD_PCT}
 
 
+@app.get("/health")
+async def health():
+    # Keep-warm/health-check target: must do zero work (no DB, no IBKR)
+    # so heavy watcher scans on the tiny free-tier CPU never make the
+    # app look dead to Render or UptimeRobot.
+    return {"ok": True}
+
+
 @app.get("/api/status")
 async def status():
     return {
