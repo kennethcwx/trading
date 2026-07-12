@@ -138,6 +138,32 @@ def get_crypto_regime(equity_regime: dict) -> dict:
     }
 
 
+def get_sgx_regime(equity_regime: dict) -> dict:
+    """SGX-native regime: Straits Times Index vs its own 200-day SMA. The S&P's
+    trend says little about Singapore banks/REITs — gating SGX entries on SPY
+    blocked (or allowed) entries for the wrong reasons. Carries the equity
+    regime's VIX and FX fields through for sizing/formatting."""
+    hist = _fetch_history("^STI")
+    close = hist["Close"].dropna() if not hist.empty else hist
+    if close is None or len(close) < SMA_LONG:
+        return equity_regime   # no STI data — fall back rather than block
+
+    sma200 = float(close.rolling(SMA_LONG).mean().iloc[-1])
+    price = float(close.iloc[-1])
+    if pd.isna(sma200) or pd.isna(price):
+        return equity_regime
+    regime_ok = price > sma200
+
+    return {
+        **equity_regime,
+        "regime_ok": regime_ok,
+        "regime": "BULLISH" if regime_ok else "BEARISH",
+        "basis": "STI",
+        "sti_price": round(price, 2),
+        "sti_sma200": round(sma200, 2),
+    }
+
+
 def get_ticker_analysis(symbol: str) -> dict | None:
     hist = _fetch_history(symbol)
     hist = hist.dropna(subset=["Close"]) if not hist.empty else hist

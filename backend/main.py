@@ -20,7 +20,7 @@ import futu_broker
 import db
 import telegram_bot
 import news
-from analysis import get_market_regime, get_crypto_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, invalidate_cache
+from analysis import get_market_regime, get_crypto_regime, get_sgx_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, invalidate_cache
 from signals import generate_signal, calculate_position_size
 from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO
 
@@ -474,6 +474,8 @@ async def sgx_watcher():
         try:
             loop = asyncio.get_event_loop()
             regime = await loop.run_in_executor(None, get_market_regime)
+            # SGX entries gate on the STI's own 200 SMA, not the S&P's
+            regime = await loop.run_in_executor(None, get_sgx_regime, regime)
 
             open_rows = db.fetch(
                 "SELECT symbol, shares, entry_price, entry_date, stop_loss, profit_target "
@@ -1062,6 +1064,8 @@ async def send_sgx_morning_briefing():
     loop = asyncio.get_event_loop()
     now_sgt = datetime.now(SGT)
     regime = await loop.run_in_executor(None, get_market_regime)
+    # SGX entries gate on the STI's own 200 SMA, not the S&P's
+    regime = await loop.run_in_executor(None, get_sgx_regime, regime)
 
     yf_symbols = [s + ".SI" for s in SGX_WATCHLIST]
     sgx_data = await _fetch_batch(yf_symbols)
@@ -1092,7 +1096,7 @@ async def send_sgx_morning_briefing():
             watching.append(f"  {symbol} @ S${price:.3f} — {reason}")
 
     lines = [f"🇸🇬 SGX Morning — {now_sgt.strftime('%a %d %b')}, opens 9:00 AM"]
-    lines.append(f"Regime: {regime.get('overall_bias','—')} | VIX {regime.get('vix','—')}")
+    lines.append(f"Regime: {regime.get('regime','—')} ({regime.get('basis','STI')}) | VIX {regime.get('vix','—')}")
     lines.append("")
     if actionable:
         lines.append("Actionable:")
