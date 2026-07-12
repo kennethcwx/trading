@@ -31,7 +31,7 @@ export const fetchTrades = () => get<TradesResponse>('/trades')
 
 export async function addTrade(data: {
   symbol: string; shares: number; entry_date: string; entry_price: number
-  signal_reason?: string; notes?: string; strategy?: 'A' | 'B' | 'C'
+  signal_reason?: string; notes?: string; strategy?: 'A' | 'B' | 'C' | 'D'
 }) {
   await apiFetch('/trades', {
     method: 'POST',

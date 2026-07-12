@@ -18,7 +18,7 @@ const inputStyle = { background: 'var(--surface-2)', border: '1px solid var(--bo
 
 function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => void }) {
   const [form, setForm] = useState({
-    symbol: '', shares: '', entry_date: today(), entry_price: '', signal_reason: '', notes: '', strategy: 'A' as 'A' | 'B' | 'C',
+    symbol: '', shares: '', entry_date: today(), entry_price: '', signal_reason: '', notes: '', strategy: 'A' as 'A' | 'B' | 'C' | 'D',
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -89,7 +89,7 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
         <div>
           <label className="block text-xs mb-1.5" style={{ color: '#888' }}>Strategy</label>
           <div className="flex gap-2">
-            {(['A', 'B', 'C'] as const).map(s => (
+            {(['A', 'B', 'C', 'D'] as const).map(s => (
               <button
                 key={s}
                 type="button"
@@ -100,7 +100,7 @@ function AddForm({ onSave, onCancel }: { onSave: () => void; onCancel: () => voi
                   : { background: 'var(--surface)', border: '1px solid var(--border-2)', color: '#666' }
                 }
               >
-                {s === 'A' ? 'A (Combined)' : s === 'B' ? 'B (Mean-Rev)' : 'C (MR·No RS)'}
+                {s === 'A' ? 'A (Combined)' : s === 'B' ? 'B (Mean-Rev)' : s === 'C' ? 'C (MR·No RS)' : 'D (SwingLow)'}
               </button>
             ))}
           </div>

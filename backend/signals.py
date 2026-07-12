@@ -93,16 +93,32 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
                        [f"Earnings in {days_to_earnings} days — wait until after to enter"],
                        "Re-evaluate after earnings")
 
+    # Strategy D uses the swing-low stop/target computed in analysis.py
+    if variant == "SWING_LOW_NOCAP":
+        stop = analysis.get("stop_loss_swing") or stop
+        target = analysis.get("profit_target_swing") or target
+
     mean_rev = (rsi is not None and rsi < RSI_ENTRY and above_200)
-    momentum = (
+    momentum_base = (
         price and high_20d and price >= high_20d
         and vol_ratio >= VOLUME_MULTIPLIER
-        and rsi is not None and RSI_ENTRY < rsi < RSI_EXIT
+        and rsi is not None
         and above_200
+    )
+    momentum = (
+        momentum_base and RSI_ENTRY < rsi < RSI_EXIT
         and sma20_above_50   # 20 SMA > 50 SMA — short-term trend aligned (COMBINED variant)
     )
+    # D: no RSI ceiling, no 20/50 SMA alignment — parity with backtest
+    # _entry_swing_low_no_cap (walk-forward winner, 7/7 windows)
+    momentum_nocap = momentum_base and rsi > RSI_ENTRY
 
-    signal_condition = mean_rev if variant in ("MEAN_REV", "MEAN_REV_NO_RS") else (mean_rev or momentum)
+    if variant in ("MEAN_REV", "MEAN_REV_NO_RS"):
+        signal_condition = mean_rev
+    elif variant == "SWING_LOW_NOCAP":
+        signal_condition = mean_rev or momentum_nocap
+    else:
+        signal_condition = mean_rev or momentum
     if signal_condition:
         label = "Mean-Reversion" if mean_rev else "Momentum Breakout"
 
@@ -123,6 +139,8 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
             tech_reasons = [f"RSI {rsi:.0f} below {RSI_ENTRY} + above 200 SMA"]
             if above_50:
                 tech_reasons.append("Pullback within uptrend (above 50 SMA)")
+        elif variant == "SWING_LOW_NOCAP":
+            tech_reasons = [f"20-day high breakout · volume {vol_ratio:.1f}x average · no RSI ceiling · swing-low stop"]
         else:
             tech_reasons = [f"20-day high breakout · volume {vol_ratio:.1f}x average · 20 SMA above 50 SMA"]
 

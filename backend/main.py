@@ -30,6 +30,7 @@ ACTIONABLE = {"BUY", "SELL", "SELL_HALF", "REVIEW"}
 _last_signals: dict[str, str] = {}
 _last_signals_b: dict[str, str] = {}
 _last_signals_c: dict[str, str] = {}
+_last_signals_d: dict[str, str] = {}
 _last_crypto_signals: dict[str, str] = {}
 _last_sgx_signals: dict[str, str] = {}
 
@@ -265,6 +266,23 @@ async def signal_watcher():
                         f"{sig_c['suggested_action']}"
                     )
                 _remember_signal(_last_signals_c, "C", symbol, action_c)
+
+                # Strategy D (SWING_LOW_NOCAP: swing-low stop + no RSI ceiling) —
+                # walk-forward winner, shadow-running since 2026-07-12.
+                # Alert only when it diverges from A, B, and C.
+                sig_d = generate_signal(
+                    d["analysis"], position, regime, d["fundamentals"], d["rel_strength"],
+                    rs_rank=rs_rank, sector_ok=sector_ok, variant="SWING_LOW_NOCAP",
+                )
+                action_d = sig_d["action"]
+                if (action_d in ACTIONABLE and action_d != _last_signals_d.get(symbol)
+                        and action_d not in (action, action_b, action_c)):
+                    telegram_bot.send(
+                        f"📊 <b>[D] {symbol} — {action_d}</b>\n"
+                        f"<code>Swing-low stop · no RSI ceiling</code>\n"
+                        f"{sig_d['suggested_action']}"
+                    )
+                _remember_signal(_last_signals_d, "D", symbol, action_d)
 
                 _remember_signal(_last_signals, "A", symbol, action)
 
@@ -1168,6 +1186,7 @@ async def lifespan(app: FastAPI):
         _last_signals.update(db.load_signal_state("A"))
         _last_signals_b.update(db.load_signal_state("B"))
         _last_signals_c.update(db.load_signal_state("C"))
+        _last_signals_d.update(db.load_signal_state("D"))
         _last_crypto_signals.update(db.load_signal_state("CRYPTO"))
         _last_sgx_signals.update(db.load_signal_state("SGX"))
         logging.info(f"Restored signal state: {sum(len(d) for d in (_last_signals, _last_signals_b, _last_signals_c, _last_crypto_signals, _last_sgx_signals))} entries")
@@ -1831,8 +1850,12 @@ async def add_trade(trade: TradeIn):
 
     # Freeze exit levels at entry: ATR stop off the entry price (current ATR is
     # the best available estimate at logging time), capped at the max-stop rule.
+    # Strategy D anchors to the structural swing low instead (8% cap, 2% floor).
     entry = trade.entry_price
-    if analysis and analysis.get("atr"):
+    if trade.strategy == "D" and analysis and analysis.get("swing_low") is not None and analysis.get("atr"):
+        stop = max(analysis["swing_low"] - 0.5 * analysis["atr"], entry * (1 - STOP_MAX_PCT))
+        stop = min(stop, entry * (1 - 0.02))
+    elif analysis and analysis.get("atr"):
         stop = max(entry - STOP_ATR_MULT * analysis["atr"], entry * (1 - STOP_MAX_PCT))
     else:
         stop = entry * (1 - STOP_MAX_PCT)

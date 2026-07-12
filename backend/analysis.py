@@ -174,6 +174,14 @@ def get_ticker_analysis(symbol: str) -> dict | None:
     stop_pct = round(((price - stop) / price) * 100, 1)
     target = price + PROFIT_RATIO * (price - stop)
 
+    # Strategy D (SWING_LOW_NOCAP) stop: structural 40-day low excluding the most
+    # recent week, minus 0.5×ATR, capped at 8% below price, floored at 2%.
+    # Must match backtest.py: swing_low = low.shift(6).rolling(40).min()
+    swing_low = float(low.iloc[-46:-6].min())
+    stop_swing = max(swing_low - 0.5 * atr_val, price * (1 - STOP_MAX_PCT))
+    stop_swing = min(stop_swing, price * (1 - 0.02))
+    target_swing = price + PROFIT_RATIO * (price - stop_swing)
+
     # Fundamental data
     try:
         info = yf.Ticker(symbol).info
@@ -223,6 +231,9 @@ def get_ticker_analysis(symbol: str) -> dict | None:
         "stop_loss": round(stop, 2),
         "stop_pct": stop_pct,
         "profit_target": round(target, 2),
+        "swing_low": round(swing_low, 2),
+        "stop_loss_swing": round(stop_swing, 2),
+        "profit_target_swing": round(target_swing, 2),
         "pe_ratio": round(pe, 1) if pe else None,
         "sector": sector,
         "earnings_date": earnings_date,
