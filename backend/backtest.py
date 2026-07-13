@@ -107,7 +107,9 @@ def _prepare(symbol: str, period: str = "3y") -> pd.DataFrame | None:
     df["sma50"]     = c.rolling(SMA_SHORT).mean()
     df["sma20"]     = c.rolling(20).mean()
     df["atr"]       = _atr(h, l, c)
-    df["vol_avg"]   = v.rolling(20).mean()
+    # 20 complete prior days, excluding the current bar — matches live
+    # analysis.py (volume.iloc[-21:-1].mean())
+    df["vol_avg"]   = v.shift(1).rolling(20).mean()
     df["vol_ratio"] = v / df["vol_avg"].replace(0, np.nan)
 
     # Donchian bands — shift(1) so we only use yesterday's data at entry
@@ -135,6 +137,50 @@ def _fetch_vix(period: str = "3y") -> pd.Series:
         return df["Close"].dropna() if not df.empty else pd.Series(dtype=float)
     except Exception:
         return pd.Series(dtype=float)
+
+
+def _fetch_regime_series(symbol: str = "SPY", period: str = "3y") -> pd.Series:
+    """Series[bool] — True on dates when the regime index is above its 200 SMA.
+    Mirrors the live gate (get_market_regime / get_sgx_regime / get_crypto_regime):
+    no new entries while the index is below its own 200-day SMA."""
+    try:
+        df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
+    except Exception:
+        return pd.Series(dtype=bool)
+    if df.empty or len(df) < SMA_LONG:
+        return pd.Series(dtype=bool)
+    sma = df["Close"].rolling(SMA_LONG).mean()
+    return (df["Close"] > sma).dropna()
+
+
+def _asof_bool(s: pd.Series, ts, default: bool = True) -> bool:
+    """Latest value of s at or before ts (handles calendar mismatches)."""
+    if s is None or s.empty:
+        return default
+    i = s.index.searchsorted(ts, side="right") - 1
+    return bool(s.iloc[i]) if i >= 0 else default
+
+
+def _fetch_earnings_blackout(symbols, days: int = 10) -> dict[str, set]:
+    """{symbol: set of dates} on which entries are blocked because earnings are
+    1–`days` days ahead. Mirrors live signals.py (earnings_warning → WATCH, no
+    entry). ETFs and symbols without earnings data get no blackout."""
+    from datetime import timedelta
+    out: dict[str, set] = {}
+    for sym in symbols:
+        try:
+            ed = yf.Ticker(sym).get_earnings_dates(limit=40)
+        except Exception:
+            continue
+        if ed is None or getattr(ed, "empty", True):
+            continue
+        blocked = set()
+        for ts in ed.index:
+            d0 = ts.date()
+            for k in range(1, days + 1):
+                blocked.add(d0 - timedelta(days=k))
+        out[sym] = blocked
+    return out
 
 
 def _fetch_sector_above_200(etfs: set[str], period: str = "3y") -> dict[str, pd.Series]:
@@ -388,6 +434,69 @@ def _entry_swing_low_no_cap(row) -> tuple[str | None, float]:
     return None, 0.0
 
 
+def _entry_nocap_atr2_cap15(row) -> tuple[str | None, float]:
+    """NO_RSI_CAP entries with crypto-sized stops: 2×ATR, capped at 15%.
+    The live 1×ATR/8% geometry sits at noise level on crypto daily vol —
+    majors routinely swing 4–6% ATR, so stops get run before the thesis plays."""
+    price = float(row["Close"])
+    if price <= row["sma200"]:
+        return None, 0.0
+    rsi_val = float(row["rsi"])
+    atr_val = float(row["atr"])
+    stop    = max(price - 2.0 * atr_val, price * (1 - 0.15))
+
+    mean_rev = rsi_val < RSI_ENTRY
+    momentum = (
+        price >= row["don_upper"]
+        and float(row["vol_ratio"]) >= VOLUME_MULTIPLIER
+        and rsi_val > RSI_ENTRY
+    )
+    if mean_rev:
+        return "MEAN_REV", stop
+    if momentum:
+        return "MOMENTUM", stop
+    return None, 0.0
+
+
+def _entry_swnc_cap15(row) -> tuple[str | None, float]:
+    """SWING_LOW_NOCAP entries but with the stop cap widened to 15% and the
+    floor to 3% — structural stop with room for crypto-scale volatility."""
+    price = float(row["Close"])
+    if price <= row["sma200"]:
+        return None, 0.0
+    rsi_val   = float(row["rsi"])
+    atr_val   = float(row["atr"])
+    swing_low = float(row["swing_low"])
+    stop = max(swing_low - 0.5 * atr_val, price * (1 - 0.15))
+    stop = min(stop, price * (1 - 0.03))
+
+    mean_rev = rsi_val < RSI_ENTRY
+    momentum = (
+        price >= row["don_upper"]
+        and float(row["vol_ratio"]) >= VOLUME_MULTIPLIER
+        and rsi_val > RSI_ENTRY
+    )
+    if mean_rev:
+        return "MEAN_REV", stop
+    if momentum:
+        return "MOMENTUM", stop
+    return None, 0.0
+
+
+def _mk_volconf(base_fn: callable, vol_min: float) -> callable:
+    """Wrap a variant: MEAN_REV entries additionally require vol_ratio >= vol_min
+    (volume confirmation on the pullback day). Momentum legs already have their
+    own volume gate and are passed through untouched."""
+    def fn(row) -> tuple[str | None, float]:
+        sig, stop = base_fn(row)
+        if sig == "MEAN_REV":
+            vr = float(row["vol_ratio"]) if not pd.isna(row["vol_ratio"]) else 0.0
+            if vr < vol_min:
+                return None, 0.0
+        return sig, stop
+    return fn
+
+
 VARIANTS: dict[str, callable] = {
     "BASELINE":        _entry_baseline,
     "SMA_CROSS":       _entry_sma_cross,
@@ -399,6 +508,15 @@ VARIANTS: dict[str, callable] = {
     "MEAN_REV_ONLY":   _entry_mean_rev_only,
     "MEAN_REV_SMA50":  _entry_mean_rev_sma50,
     "MEAN_REV_RSI35":  _entry_mean_rev_rsi35,
+    # Volume confirmation on the mean-rev leg (KIV #3) — applied to the live
+    # shadow variant (D) and to pure mean-rev (B/C proxy)
+    "SWNC_MRVOL12":    _mk_volconf(_entry_swing_low_no_cap, 1.2),
+    "SWNC_MRVOL15":    _mk_volconf(_entry_swing_low_no_cap, 1.5),
+    "MR_ONLY_VOL12":   _mk_volconf(_entry_mean_rev_only, 1.2),
+    "MR_ONLY_VOL15":   _mk_volconf(_entry_mean_rev_only, 1.5),
+    # Crypto-scale stop geometry (KIV: 1×ATR/8% cap is noise-level on crypto)
+    "NOCAP_ATR2_C15":  _entry_nocap_atr2_cap15,
+    "SWNC_C15":        _entry_swnc_cap15,
 }
 
 
@@ -416,6 +534,8 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
          rs_rank_series: pd.Series | None = None,
          rs3m_series: pd.Series | None = None,
          vix_series: pd.Series | None = None,
+         regime_series: pd.Series | None = None,
+         earnings_blocked: set | None = None,
          diagnose: bool = False) -> list[dict]:
     """Run backtest for a single symbol.
 
@@ -430,10 +550,10 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
     trades: list[dict] = []
     pos = None
 
-    for i, (date, row) in enumerate(df.iterrows()):
-        if i < SMA_LONG:
-            continue
-
+    # No extra warmup skip here: _prepare already drops all rows with unformed
+    # indicators (sma200/atr/donchian/swing). Skipping another SMA_LONG rows of
+    # VALID data silently starved the oldest walk-forward windows of entries.
+    for date, row in df.iterrows():
         price    = float(row["Close"])
         rsi_val  = float(row["rsi"])
         above200 = price > float(row["sma200"])
@@ -511,6 +631,15 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
 
         # ── ENTRY (within the entry window only) ─────────────────────────────
         if not (entry_open <= date <= entry_close):
+            continue
+
+        # Market regime gate — live blocks ALL entries when the regime index is
+        # below its 200 SMA (hard gate, applies even in diagnose mode)
+        if regime_series is not None and not _asof_bool(regime_series, date):
+            continue
+
+        # Earnings blackout — live emits WATCH (no entry) within 10d of earnings
+        if earnings_blocked and date.date() in earnings_blocked:
             continue
 
         # Evaluate filters
@@ -606,7 +735,11 @@ def _metrics(trades: list[dict], label: str = "", phase: str = "") -> dict:
     win_rate = len(winners) / len(closed) * 100
     avg_w    = winners["pnl_pct"].mean() if len(winners) else 0.0
     avg_l    = losers["pnl_pct"].mean()  if len(losers)  else 0.0
-    exp      = win_rate / 100 * avg_w + (1 - win_rate / 100) * avg_l
+    # Capital-weighted expectancy: a half-exit (frac 0.5) counts half a full
+    # stop-out (frac 1.0). Unweighted per-leg averaging overweights variants
+    # that scale out often — winners produce two 0.5 legs, losers one 1.0 leg.
+    w   = closed["frac"] if "frac" in closed.columns else pd.Series(1.0, index=closed.index)
+    exp = float((closed["pnl_pct"] * w).sum() / w.sum()) if float(w.sum()) else 0.0
 
     return {
         "label":    label,
@@ -738,7 +871,7 @@ WF_WINDOW_DAYS = 182
 
 
 def _run_walkforward(prepared_dfs: dict[str, pd.DataFrame], n_windows: int,
-                     filters_fn) -> dict[str, list[dict]]:
+                     filters_fn, regime_series: pd.Series | None = None) -> dict[str, list[dict]]:
     """Returns {variant: [ {window metrics + trades}, ... ]} oldest window first."""
     results: dict[str, list[dict]] = {v: [] for v in VARIANTS}
     for w in range(n_windows - 1, -1, -1):      # oldest first
@@ -747,11 +880,12 @@ def _run_walkforward(prepared_dfs: dict[str, pd.DataFrame], n_windows: int,
         for vname, entry_fn in VARIANTS.items():
             trades: list[dict] = []
             for sym, df in prepared_dfs.items():
-                sector_s, rs_s, rs3m_s, _vix = filters_fn(sym)
+                sector_s, rs_s, rs3m_s, _vix, earn_blk = filters_fn(sym)
                 trades.extend(_run(sym, df, entry_fn,
                                    entry_start_days=start_days, entry_end_days=end_days,
                                    sector_above_200=sector_s, rs_rank_series=rs_s,
-                                   rs3m_series=rs3m_s))
+                                   rs3m_series=rs3m_s, regime_series=regime_series,
+                                   earnings_blocked=earn_blk))
             m = _metrics(trades, label=vname)
             m["window"] = f"-{end_days}d…-{start_days}d"
             results[vname].append(m)
@@ -828,7 +962,8 @@ PF_MIN_CASH_PCT = 0.10    # keep 10% of equity in cash
 PF_COST = SLIPPAGE_PCT + COMMISSION_PCT   # applied to each fill
 
 
-def _run_portfolio(prepared_dfs: dict[str, pd.DataFrame], entry_fn, filters_fn) -> dict:
+def _run_portfolio(prepared_dfs: dict[str, pd.DataFrame], entry_fn, filters_fn,
+                   regime_series: pd.Series | None = None) -> dict:
     start_usd = PF_START_SGD * PF_SGD_TO_USD
     cash = start_usd
     positions: dict[str, dict] = {}
@@ -836,9 +971,9 @@ def _run_portfolio(prepared_dfs: dict[str, pd.DataFrame], entry_fn, filters_fn) 
     skipped_capital = 0
     exposure_days = 0
 
-    # Union trading calendar; per-symbol first tradable index after warmup
+    # Union trading calendar — _prepare already dropped all warmup rows, so
+    # every remaining row has formed indicators (no extra SMA_LONG skip)
     calendars = {s: df.index for s, df in prepared_dfs.items()}
-    warmup_start = {s: idx[min(SMA_LONG, len(idx) - 1)] for s, idx in calendars.items()}
     all_dates = sorted(set().union(*[set(idx) for idx in calendars.values()]))
 
     equity_curve: list[tuple] = []
@@ -908,10 +1043,15 @@ def _run_portfolio(prepared_dfs: dict[str, pd.DataFrame], entry_fn, filters_fn) 
 
         # ── entries: collect today's candidates, best RS rank first ──
         candidates = []
+        regime_ok_today = regime_series is None or _asof_bool(regime_series, date)
         for sym, df in prepared_dfs.items():
-            if sym in positions or date not in calendars[sym] or date < warmup_start[sym]:
+            if not regime_ok_today:
+                break
+            if sym in positions or date not in calendars[sym]:
                 continue
-            sector_s, rs_s, _rs3m, _vix = filters_fn(sym)
+            sector_s, rs_s, _rs3m, _vix, earn_blk = filters_fn(sym)
+            if earn_blk and date.date() in earn_blk:
+                continue
             if rs_s is not None and date in rs_s.index and float(rs_s[date]) < 75:
                 continue
             if sector_s is not None and date in sector_s.index and not bool(sector_s[date]):
@@ -1094,7 +1234,20 @@ def main():
                         help="Simulate the actual S$5k account (shared capital, risk sizing, cash floor) per variant on 5y data")
     parser.add_argument("--windows",    type=int, default=8,
                         help="Number of walk-forward windows (default 8 = ~4 years of entries)")
+    parser.add_argument("--regime-symbol", default="SPY",
+                        help="Index for the 200 SMA regime gate (SPY, ^STI, BTC-USD)")
+    parser.add_argument("--no-regime",  action="store_true",
+                        help="Disable the market regime gate (live always applies it)")
+    parser.add_argument("--earnings-blackout", action="store_true",
+                        help="Block entries within 10 days before earnings (mirrors live WATCH)")
+    parser.add_argument("--profit-ratio", type=float, default=None,
+                        help="Override reward:risk target (default 2.0) — e.g. 1.5 for range-bound SGX, 3.0 for trending crypto")
     args = parser.parse_args()
+
+    if args.profit_ratio:
+        global PROFIT_RATIO
+        PROFIT_RATIO = args.profit_ratio
+        print(f"Profit ratio override: {PROFIT_RATIO}:1")
 
     symbols = args.symbols or UNIVERSE
     period = "5y" if (args.walkforward or args.portfolio) else "3y"
@@ -1137,13 +1290,28 @@ def main():
         vix_series = _fetch_vix(period=period)
         print("done")
 
-    def _filters(sym: str) -> tuple[pd.Series | None, pd.Series | None, pd.Series | None, pd.Series]:
+    regime_series: pd.Series | None = None
+    if not args.no_regime:
+        print(f"Fetching regime index ({args.regime_symbol})…", end=" ", flush=True)
+        regime_series = _fetch_regime_series(args.regime_symbol, period=period)
+        print(f"done ({len(regime_series)} days)" if not regime_series.empty else "no data — gate off")
+        if regime_series.empty:
+            regime_series = None
+
+    earnings_blackout: dict[str, set] = {}
+    if args.earnings_blackout:
+        print("Fetching earnings dates…", end=" ", flush=True)
+        earnings_blackout = _fetch_earnings_blackout(list(prepared_dfs))
+        print(f"done ({len(earnings_blackout)} symbols with earnings)")
+
+    def _filters(sym: str) -> tuple:
         sector_etf = SECTOR_ETF_MAP.get(sym)
         return (
             sector_cache.get(sector_etf) if sector_etf else None,
             rs_rank_map.get(sym),
             rs3m_map.get(sym),
             vix_series,
+            earnings_blackout.get(sym),
         )
 
     # ── Pass 2: run backtest ──────────────────────────────────────────────────
@@ -1153,7 +1321,8 @@ def main():
         for vname, entry_fn in VARIANTS.items():
             sys.stdout.write(f"  {vname:<17} … ")
             sys.stdout.flush()
-            pf_results[vname] = _run_portfolio(prepared_dfs, entry_fn, _filters)
+            pf_results[vname] = _run_portfolio(prepared_dfs, entry_fn, _filters,
+                                               regime_series=regime_series)
             print(f"end S${pf_results[vname]['end_equity_sgd']:.0f}")
         span = next(iter(prepared_dfs.values())).index
         years_label = f"{span[0].date()} to {span[-1].date()}"
@@ -1162,18 +1331,20 @@ def main():
     elif args.walkforward:
         print(f"\nRunning walk-forward: {args.windows} × {WF_WINDOW_DAYS}d entry windows, "
               f"{len(VARIANTS)} variants, filters {'off' if args.no_filters else 'on'}…")
-        results = _run_walkforward(prepared_dfs, args.windows, _filters)
+        results = _run_walkforward(prepared_dfs, args.windows, _filters,
+                                   regime_series=regime_series)
         _report_walkforward(results, args.windows)
 
     elif args.diagnose:
         print(f"\nRunning diagnostic (MEAN_REV_ONLY, validate window, filters + VIX tagged)…\n")
         all_trades: list[dict] = []
         for sym, df in prepared_dfs.items():
-            sector_s, rs_s, rs3m_s, vix_s = _filters(sym)
+            sector_s, rs_s, rs3m_s, vix_s, earn_blk = _filters(sym)
             legs = _run(sym, df, _entry_mean_rev_only,
                         entry_start_days=0, entry_end_days=VALIDATE_DAYS,
                         sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s,
-                        vix_series=vix_s, diagnose=True)
+                        vix_series=vix_s, regime_series=regime_series,
+                        earnings_blocked=earn_blk, diagnose=True)
             if legs:
                 print(f"  {sym:<6}   {len(legs)} legs")
             all_trades.extend(legs)
@@ -1188,15 +1359,17 @@ def main():
         results: dict[str, dict[str, list[dict]]] = {v: {"train": [], "validate": []} for v in VARIANTS}
 
         for sym, df in prepared_dfs.items():
-            sector_s, rs_s, rs3m_s, vix_s = _filters(sym)
+            sector_s, rs_s, rs3m_s, vix_s, earn_blk = _filters(sym)
             counts = []
             for vname, entry_fn in VARIANTS.items():
                 train_trades    = _run(sym, df, entry_fn,
                                        entry_start_days=VALIDATE_DAYS, entry_end_days=TRAIN_DAYS,
-                                       sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s)
+                                       sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s,
+                                       regime_series=regime_series, earnings_blocked=earn_blk)
                 validate_trades = _run(sym, df, entry_fn,
                                        entry_start_days=0, entry_end_days=VALIDATE_DAYS,
-                                       sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s)
+                                       sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s,
+                                       regime_series=regime_series, earnings_blocked=earn_blk)
                 results[vname]["train"].extend(train_trades)
                 results[vname]["validate"].extend(validate_trades)
                 counts.append(f"{vname[:3]}:{len(train_trades)+len(validate_trades)}")
@@ -1208,10 +1381,11 @@ def main():
         print(f"\nRunning {args.days}d backtest (BASELINE)…")
         all_trades = []
         for sym, df in prepared_dfs.items():
-            sector_s, rs_s, rs3m_s, vix_s = _filters(sym)
+            sector_s, rs_s, rs3m_s, vix_s, earn_blk = _filters(sym)
             legs = _run(sym, df, _entry_baseline,
                         entry_start_days=0, entry_end_days=args.days,
-                        sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s)
+                        sector_above_200=sector_s, rs_rank_series=rs_s, rs3m_series=rs3m_s,
+                        regime_series=regime_series, earnings_blocked=earn_blk)
             all_trades.extend(legs)
             print(f"  {sym:<6}   {len(legs)} legs")
 
