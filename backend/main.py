@@ -32,6 +32,43 @@ _last_signals_b: dict[str, str] = {}
 _last_signals_c: dict[str, str] = {}
 _last_signals_d: dict[str, str] = {}
 _last_crypto_signals: dict[str, str] = {}
+
+# ── Daily summary event log ──────────────────────────────────────────────────
+# Every US/SGX signal event lands here (sent immediately or queued); the daily
+# summary tasks drain it. In-memory: a redeploy drops undelivered queue entries,
+# which is acceptable for a convenience digest — exits always send immediately.
+_event_log: list[dict] = []
+
+
+def _log_event(market: str, text: str, sent: bool):
+    _event_log.append({"ts": datetime.now(SGT), "market": market, "sent": sent, "text": text})
+    if len(_event_log) > 200:
+        del _event_log[: len(_event_log) - 200]
+
+
+def _drain_events(market: str) -> list[dict]:
+    kept = [e for e in _event_log if e["market"] != market]
+    drained = [e for e in _event_log if e["market"] == market]
+    _event_log[:] = kept
+    return drained
+
+
+def _us_alert_window() -> bool:
+    """First 2 hours after the US open — 21:30–23:30 SGT (DST), when the user is
+    awake to act. Entry alerts outside this window queue into the 7:30 AM SGT
+    summary instead of buzzing the phone at 2 AM; exits always send."""
+    now = datetime.now(ET)
+    open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    return open_t <= now < open_t + timedelta(hours=2)
+
+
+def _send_or_queue_us(tag: str, symbol: str, action: str, detail: str, msg: str, is_exit: bool):
+    line = f"[{tag}] {action} {symbol} — {detail}"
+    if is_exit or _us_alert_window():
+        telegram_bot.send(msg)
+        _log_event("US", line, sent=True)
+    else:
+        _log_event("US", line, sent=False)
 _last_sgx_signals: dict[str, str] = {}
 
 
@@ -237,7 +274,8 @@ async def signal_watcher():
                     msg = telegram_bot.format_signal(
                         symbol, signal, d["analysis"], pos_size, d["fundamentals"]
                     )
-                    telegram_bot.send(msg)
+                    _send_or_queue_us("A", symbol, action, signal["suggested_action"], msg,
+                                      is_exit=position is not None)
 
                 # Strategy B (Mean-Rev only) — alert only when it diverges from A
                 sig_b = generate_signal(
@@ -246,10 +284,12 @@ async def signal_watcher():
                 )
                 action_b = sig_b["action"]
                 if action_b in ACTIONABLE and action_b != _last_signals_b.get(symbol) and action_b != action:
-                    telegram_bot.send(
+                    _send_or_queue_us(
+                        "B", symbol, action_b, sig_b["suggested_action"],
                         f"📊 <b>[B] {symbol} — {action_b}</b>\n"
                         f"<code>Mean-Rev only</code>\n"
-                        f"{sig_b['suggested_action']}"
+                        f"{sig_b['suggested_action']}",
+                        is_exit=position is not None,
                     )
                 _remember_signal(_last_signals_b, "B", symbol, action_b)
 
@@ -260,10 +300,12 @@ async def signal_watcher():
                 )
                 action_c = sig_c["action"]
                 if action_c in ACTIONABLE and action_c != _last_signals_c.get(symbol) and action_c != action and action_c != action_b:
-                    telegram_bot.send(
+                    _send_or_queue_us(
+                        "C", symbol, action_c, sig_c["suggested_action"],
                         f"📊 <b>[C] {symbol} — {action_c}</b>\n"
                         f"<code>Mean-Rev · no RS filter</code>\n"
-                        f"{sig_c['suggested_action']}"
+                        f"{sig_c['suggested_action']}",
+                        is_exit=position is not None,
                     )
                 _remember_signal(_last_signals_c, "C", symbol, action_c)
 
@@ -277,10 +319,12 @@ async def signal_watcher():
                 action_d = sig_d["action"]
                 if (action_d in ACTIONABLE and action_d != _last_signals_d.get(symbol)
                         and action_d not in (action, action_b, action_c)):
-                    telegram_bot.send(
+                    _send_or_queue_us(
+                        "D", symbol, action_d, sig_d["suggested_action"],
                         f"📊 <b>[D] {symbol} — {action_d}</b>\n"
                         f"<code>Swing-low stop · no RSI ceiling</code>\n"
-                        f"{sig_d['suggested_action']}"
+                        f"{sig_d['suggested_action']}",
+                        is_exit=position is not None,
                     )
                 _remember_signal(_last_signals_d, "D", symbol, action_d)
 
@@ -322,6 +366,7 @@ async def signal_watcher():
                         f"</code>\n\n"
                         f"Close remaining half."
                     )
+                    _log_event("US", f"Trail stop {sym} — close remaining half at ${current:.2f}", sent=True)
                     db.mutate("UPDATE trades SET half_sold = 2 WHERE id = ?", (trade["id"],))
 
             # Price alerts — first drop stale auto alerts from untaken BUY signals
@@ -346,6 +391,9 @@ async def signal_watcher():
                         f"Current  ${current:.2f}"
                         f"</code>"
                     )
+                    if alert["symbol"] not in CRYPTO_WATCHLIST:
+                        market = "SGX" if alert["symbol"].endswith(".SI") else "US"
+                        _log_event(market, f"Price alert {alert['symbol']} {arrow} ${alert['target']:.2f} (now ${current:.2f})", sent=True)
                     db.remove_price_alert(alert["id"])
 
         except Exception as e:
@@ -555,6 +603,7 @@ async def sgx_watcher():
 
                     msg = telegram_bot.format_signal(symbol, signal, d["analysis"], None, d["fundamentals"])
                     telegram_bot.send(msg + order_note)
+                    _log_event("SGX", f"{action} {symbol} @ S${price:.3f} — {signal['suggested_action']}", sent=True)
 
                 _remember_signal(_last_sgx_signals, "SGX", symbol, action)
 
@@ -1103,7 +1152,9 @@ async def send_sgx_morning_briefing():
     for d in sgx_data:
         symbol = d["symbol"].replace(".SI", "")
         position = sgx_position_map.get(symbol)
-        signal = generate_signal(d["analysis"], position, regime)
+        # Must match the sgx_watcher variant or briefing and alerts disagree
+        signal = generate_signal(d["analysis"], position, regime,
+                                 variant="SWING_LOW_NOCAP")
         action = signal["action"]
         price = d["analysis"]["price"]
         reason = signal["reasons"][0] if signal["reasons"] else signal["suggested_action"]
@@ -1151,6 +1202,77 @@ async def sgx_briefing_task():
             await send_sgx_morning_briefing()
         except Exception as e:
             logging.warning(f"SGX briefing error: {e}")
+            await asyncio.sleep(60)
+
+
+async def _send_daily_summary(market: str):
+    """Drain the event log for one market and send a day summary: what fired
+    (sent immediately or queued outside the alert window) + open positions."""
+    loop = asyncio.get_event_loop()
+    events = _drain_events(market)
+
+    rows = db.fetch("SELECT * FROM trades WHERE exit_price IS NULL ORDER BY entry_date DESC")
+    if market == "SGX":
+        positions = [r for r in rows if r["symbol"] in SGX_WATCHLIST]
+    else:
+        positions = [r for r in rows
+                     if r["symbol"] not in SGX_WATCHLIST and r["symbol"] not in CRYPTO_WATCHLIST]
+
+    if not events and not positions:
+        return   # nothing to say — don't send an empty digest
+
+    regime = await loop.run_in_executor(None, get_market_regime)
+    if market == "SGX":
+        regime = await loop.run_in_executor(None, get_sgx_regime, regime)
+
+    flag = "🇸🇬" if market == "SGX" else "🇺🇸"
+    label = "SGX Day Summary" if market == "SGX" else "US Session Summary (overnight)"
+    lines = [f"{flag} <b>{label} — {datetime.now(SGT).strftime('%a %d %b')}</b>",
+             f"Regime: {regime.get('regime','—')} ({regime.get('basis', 'SPY')})", ""]
+
+    if events:
+        lines.append("Signals (✓ sent · ⏸ queued):")
+        for e in events:
+            mark = "✓" if e["sent"] else "⏸"
+            lines.append(f"  {mark} {e['ts'].strftime('%H:%M')}  {e['text']}")
+    else:
+        lines.append("No signals fired.")
+
+    if positions:
+        lines.append("")
+        lines.append("Open positions:")
+        for t in positions:
+            yf_sym = t["symbol"] + ".SI" if market == "SGX" else t["symbol"]
+            analysis = await loop.run_in_executor(None, get_ticker_analysis, yf_sym)
+            if analysis:
+                pnl = (analysis["price"] - t["entry_price"]) / t["entry_price"] * 100
+                lines.append(f"  {t['symbol']}  {t['entry_price']:.2f} → {analysis['price']:.2f}  ({pnl:+.1f}%)")
+            else:
+                lines.append(f"  {t['symbol']}  entry {t['entry_price']:.2f} (no price data)")
+
+    if any(not e["sent"] for e in events):
+        lines.append("")
+        lines.append("⏸ queued entries are re-checked in tonight's pre-open briefing — only act if still valid.")
+
+    telegram_bot.send("\n".join(lines))
+
+
+async def daily_summary_task(market: str, hour: int, minute: int, skip_weekdays: tuple):
+    """Send the day summary at a fixed SGT time, skipping non-session days.
+    US: 7:30 SGT Tue–Sat (session ends ~4–5 AM SGT). SGX: 17:45 SGT Mon–Fri."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            now = datetime.now(SGT)
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            while target.weekday() in skip_weekdays:
+                target += timedelta(days=1)
+            await asyncio.sleep((target - datetime.now(SGT)).total_seconds())
+            await _send_daily_summary(market)
+        except Exception as e:
+            logging.warning(f"{market} daily summary error: {e}")
             await asyncio.sleep(60)
 
 
@@ -1222,6 +1344,10 @@ async def lifespan(app: FastAPI):
     listener = asyncio.create_task(telegram_command_listener())
     briefing = asyncio.create_task(morning_briefing_task())
     sgx_briefing = asyncio.create_task(sgx_briefing_task())
+    # Day summaries: US at 7:30 SGT Tue–Sat (Sun=6, Mon=0 skipped);
+    # SGX at 17:45 SGT Mon–Fri (Sat=5, Sun=6 skipped)
+    us_summary = asyncio.create_task(daily_summary_task("US", 7, 30, (6, 0)))
+    sgx_summary = asyncio.create_task(daily_summary_task("SGX", 17, 45, (5, 6)))
     telegram_bot.set_bot_commands()
     telegram_bot.send(telegram_bot.format_startup(db.get_watchlist()))
     yield
@@ -1230,6 +1356,8 @@ async def lifespan(app: FastAPI):
     news_task.cancel()
     listener.cancel()
     briefing.cancel()
+    us_summary.cancel()
+    sgx_summary.cancel()
 
 
 def _sanitize_nan(obj):
