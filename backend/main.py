@@ -496,17 +496,24 @@ async def sgx_watcher():
                 yf_sym   = d["symbol"]
                 symbol   = yf_sym.replace(".SI", "")
                 position = sgx_position_map.get(symbol)
-                signal   = generate_signal(d["analysis"], position, regime)
+                # SWING_LOW_NOCAP since 2026-07-13: on the 27-name universe the
+                # swing-low-stop geometry backtests at +6.5% CAGR vs +0.3% for
+                # COMBINED on the old 8-name list (see backtest.py runs)
+                signal   = generate_signal(d["analysis"], position, regime,
+                                           variant="SWING_LOW_NOCAP")
                 action   = signal["action"]
                 prev     = _last_sgx_signals.get(symbol)
                 price    = d["analysis"]["price"]
+                # Variant D anchors exits at the structural swing low, not ATR
+                sgx_stop   = d["analysis"].get("stop_loss_swing") or d["analysis"]["stop_loss"]
+                sgx_target = d["analysis"].get("profit_target_swing") or d["analysis"]["profit_target"]
 
                 if action in ACTIONABLE and action != prev:
                     order_note = ""
                     if futu_broker.is_available():
                         tag = " [PAPER]" if futu_broker.is_paper() else ""
                         if action == "BUY" and not position:
-                            stop           = d["analysis"]["stop_loss"]
+                            stop           = sgx_stop
                             risk_per_share = price - stop
                             if risk_per_share > 0:
                                 risk_sgd = SGX_PORTFOLIO_SGD * RISK_PER_TRADE_PCT
@@ -526,10 +533,10 @@ async def sgx_watcher():
                                             "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes, strategy, stop_loss, profit_target) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                             (symbol, qty, datetime.today().strftime("%Y-%m-%d"), price,
                                              "SGX Auto-BUY", f"Futu order {order_id}", "SGX",
-                                             d["analysis"]["stop_loss"], d["analysis"]["profit_target"]),
+                                             sgx_stop, sgx_target),
                                         )
-                                        db.add_price_alert(yf_sym, d["analysis"]["stop_loss"],     "below", source="trade")
-                                        db.add_price_alert(yf_sym, d["analysis"]["profit_target"], "above", source="trade")
+                                        db.add_price_alert(yf_sym, sgx_stop,   "below", source="trade")
+                                        db.add_price_alert(yf_sym, sgx_target, "above", source="trade")
 
                         elif action in ("SELL", "SELL_HALF") and position:
                             shares = position["shares"]
@@ -546,7 +553,9 @@ async def sgx_watcher():
         except Exception as e:
             logging.warning(f"SGX watcher error: {e}")
 
-        await asyncio.sleep(5 * 60)
+        # 15 min matches the analysis cache TTL — with 27 symbols a 5-min loop
+        # would only re-read cached data anyway while tripling yfinance load
+        await asyncio.sleep(15 * 60)
 
 
 async def news_watcher():

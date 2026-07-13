@@ -101,7 +101,16 @@ IBKR_CLIENT_ID = 1
 
 # Futu/moomoo — SGX auto-trading via Futu OpenD
 # Bare SGX codes (no .SI suffix). yfinance appends .SI; Futu uses SG.{code}
-SGX_WATCHLIST = ["D05", "O39", "U11", "A17U", "C38U", "ME8U", "Z74", "C6L"]
+# Expanded 8→27 liquid STI names 2026-07-13: the strategy's SGX edge only
+# appears with breadth (backtest: +6.5% CAGR on 27 names vs +0.3% on 8 with
+# the same logic — too few concurrent setups to compound on a narrow list).
+SGX_WATCHLIST = [
+    "D05", "O39", "U11",                              # banks
+    "A17U", "C38U", "ME8U", "M44U", "N2IU", "AJBU", "BUOU",   # REITs
+    "S63", "S68", "U96", "BN4", "9CI", "C09",         # industrials / property
+    "Z74", "C6L", "F34", "V03", "G13", "C52",         # telco / transport / consumer
+    "BS6", "S58", "U14", "C07", "Y92",
+]
 SGX_PORTFOLIO_SGD = 5000     # paper capital allocation for SGX (cash-only, no margin)
 
 # News feed — zero-cost: yfinance headlines only, no Claude/LLM calls.
