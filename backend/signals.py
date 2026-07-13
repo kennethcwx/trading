@@ -112,11 +112,16 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
     # D: no RSI ceiling, no 20/50 SMA alignment — parity with backtest
     # _entry_swing_low_no_cap (walk-forward winner, 7/7 windows)
     momentum_nocap = momentum_base and rsi > RSI_ENTRY
+    # BASELINE (crypto since 2026-07-13): RSI ceiling kept, 20/50 alignment
+    # dropped — beat COMBINED by ~0.8pp CAGR in all five crypto backtest configs
+    momentum_baseline = momentum_base and RSI_ENTRY < rsi < RSI_EXIT
 
     if variant in ("MEAN_REV", "MEAN_REV_NO_RS"):
         signal_condition = mean_rev
     elif variant == "SWING_LOW_NOCAP":
         signal_condition = mean_rev or momentum_nocap
+    elif variant == "BASELINE":
+        signal_condition = mean_rev or momentum_baseline
     else:
         signal_condition = mean_rev or momentum
     if signal_condition:
@@ -141,6 +146,8 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
                 tech_reasons.append("Pullback within uptrend (above 50 SMA)")
         elif variant == "SWING_LOW_NOCAP":
             tech_reasons = [f"20-day high breakout · volume {vol_ratio:.1f}x average · no RSI ceiling · swing-low stop"]
+        elif variant == "BASELINE":
+            tech_reasons = [f"20-day high breakout · volume {vol_ratio:.1f}x average"]
         else:
             tech_reasons = [f"20-day high breakout · volume {vol_ratio:.1f}x average · 20 SMA above 50 SMA"]
 

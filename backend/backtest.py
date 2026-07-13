@@ -34,6 +34,8 @@ STOP_MAX_PCT    = 0.08
 MAX_HOLD_WEEKS  = 8
 TRAILING_TRIGGER  = 0.15   # activate trailing stop when second half gains 15% from entry
 TRAILING_STOP_PCT = 0.10   # trail 10% below peak after activation
+PERSISTENT_TRAIL  = False  # --persistent-trail: arm off PEAK gain and stay armed
+                           # (live/backtest both de-arm when price falls below +15%)
 
 SLIPPAGE_PCT    = 0.001   # 0.1% per trade (entry + exit)
 COMMISSION_PCT  = 0.0005  # 0.05% per trade leg
@@ -115,6 +117,8 @@ def _prepare(symbol: str, period: str = "3y") -> pd.DataFrame | None:
     # Donchian bands — shift(1) so we only use yesterday's data at entry
     df["don_upper"] = h.shift(1).rolling(MOMENTUM_DAYS).max()  # 20-day high
     df["don_lower"] = l.shift(1).rolling(MOMENTUM_DAYS).min()  # 20-day low
+    # 30-bar channel — on 7-day-week assets 20 bars is only ~3 calendar weeks
+    df["don_upper30"] = h.shift(1).rolling(30).max()
 
     # Structural swing low — lowest low ~7-46 days back, excluding the most
     # recent week so the very pullback that triggers entry doesn't define its own stop
@@ -483,6 +487,52 @@ def _entry_swnc_cap15(row) -> tuple[str | None, float]:
     return None, 0.0
 
 
+def _entry_base_rsi45(row) -> tuple[str | None, float]:
+    """BASELINE but mean-rev triggers at RSI < 45 — crypto pullbacks are fast
+    and often don't reach the stock-tuned RSI 40 before resuming."""
+    price = float(row["Close"])
+    if price <= row["sma200"]:
+        return None, 0.0
+    rsi_val = float(row["rsi"])
+    atr_val = float(row["atr"])
+    stop    = max(price - STOP_ATR_MULT * atr_val, price * (1 - STOP_MAX_PCT))
+
+    mean_rev = rsi_val < 45
+    momentum = (
+        price >= row["don_upper"]
+        and float(row["vol_ratio"]) >= VOLUME_MULTIPLIER
+        and 45 < rsi_val < RSI_EXIT
+    )
+    if mean_rev:
+        return "MEAN_REV", stop
+    if momentum:
+        return "MOMENTUM", stop
+    return None, 0.0
+
+
+def _entry_base_don30(row) -> tuple[str | None, float]:
+    """BASELINE but momentum breaks a 30-bar channel (~1 month on 7-day-week
+    assets, matching the stock strategy's calendar horizon)."""
+    price = float(row["Close"])
+    if price <= row["sma200"]:
+        return None, 0.0
+    rsi_val = float(row["rsi"])
+    atr_val = float(row["atr"])
+    stop    = max(price - STOP_ATR_MULT * atr_val, price * (1 - STOP_MAX_PCT))
+
+    mean_rev = rsi_val < RSI_ENTRY
+    momentum = (
+        price >= row["don_upper30"]
+        and float(row["vol_ratio"]) >= VOLUME_MULTIPLIER
+        and RSI_ENTRY < rsi_val < RSI_EXIT
+    )
+    if mean_rev:
+        return "MEAN_REV", stop
+    if momentum:
+        return "MOMENTUM", stop
+    return None, 0.0
+
+
 def _mk_volconf(base_fn: callable, vol_min: float) -> callable:
     """Wrap a variant: MEAN_REV entries additionally require vol_ratio >= vol_min
     (volume confirmation on the pullback day). Momentum legs already have their
@@ -517,6 +567,9 @@ VARIANTS: dict[str, callable] = {
     # Crypto-scale stop geometry (KIV: 1×ATR/8% cap is noise-level on crypto)
     "NOCAP_ATR2_C15":  _entry_nocap_atr2_cap15,
     "SWNC_C15":        _entry_swnc_cap15,
+    # Crypto parameter probes (2026-07-13 round 2)
+    "BASE_RSI45":      _entry_base_rsi45,
+    "BASE_DON30":      _entry_base_don30,
 }
 
 
@@ -618,7 +671,8 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
                 # Second half — track peak and apply trailing stop once 15% gain
                 pos["peak"] = max(pos.get("peak", ep), price)
                 gain = (price - ep) / ep
-                if gain >= TRAILING_TRIGGER:
+                arm_gain = (pos["peak"] - ep) / ep if PERSISTENT_TRAIL else gain
+                if arm_gain >= TRAILING_TRIGGER:
                     trail_stop = pos["peak"] * (1 - TRAILING_STOP_PCT)
                     if low_px <= trail_stop:
                         _record("trail_stop", min(open_px, trail_stop), pos["shares"])
@@ -1034,7 +1088,8 @@ def _run_portfolio(prepared_dfs: dict[str, pd.DataFrame], entry_fn, filters_fn,
             else:
                 pos["peak"] = max(pos["peak"], price)
                 gain = (price - ep) / ep
-                if gain >= TRAILING_TRIGGER and low_px <= pos["peak"] * (1 - TRAILING_STOP_PCT):
+                arm_gain = (pos["peak"] - ep) / ep if PERSISTENT_TRAIL else gain
+                if arm_gain >= TRAILING_TRIGGER and low_px <= pos["peak"] * (1 - TRAILING_STOP_PCT):
                     _close(sym, pos, min(open_px, pos["peak"] * (1 - TRAILING_STOP_PCT)), 1.0, "trail_stop", date)
                     del positions[sym]
                 elif weeks >= MAX_HOLD_WEEKS and gain * 100 < 5:
@@ -1242,12 +1297,22 @@ def main():
                         help="Block entries within 10 days before earnings (mirrors live WATCH)")
     parser.add_argument("--profit-ratio", type=float, default=None,
                         help="Override reward:risk target (default 2.0) — e.g. 1.5 for range-bound SGX, 3.0 for trending crypto")
+    parser.add_argument("--max-hold-weeks", type=int, default=None,
+                        help="Override the time stop (default 8 weeks)")
+    parser.add_argument("--persistent-trail", action="store_true",
+                        help="Trailing stop arms off peak gain and stays armed (tests the live de-arm quirk)")
     args = parser.parse_args()
 
+    global PROFIT_RATIO, MAX_HOLD_WEEKS, PERSISTENT_TRAIL
     if args.profit_ratio:
-        global PROFIT_RATIO
         PROFIT_RATIO = args.profit_ratio
         print(f"Profit ratio override: {PROFIT_RATIO}:1")
+    if args.max_hold_weeks:
+        MAX_HOLD_WEEKS = args.max_hold_weeks
+        print(f"Time stop override: {MAX_HOLD_WEEKS} weeks")
+    if args.persistent_trail:
+        PERSISTENT_TRAIL = True
+        print("Persistent trailing stop: ON")
 
     symbols = args.symbols or UNIVERSE
     period = "5y" if (args.walkforward or args.portfolio) else "3y"

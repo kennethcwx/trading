@@ -305,7 +305,13 @@ async def signal_watcher():
                     )
                 gain = (current - ep) / ep
                 trail_stop = new_peak * (1 - TRAILING_STOP_PCT)
-                if gain >= TRAILING_TRIGGER and current <= trail_stop:
+                # Crypto arms off PEAK gain and stays armed — the de-arm-on-retrace
+                # behavior round-trips crypto winners to breakeven (backtest: fixing
+                # it adds ~0.4pp CAGR and cuts drawdown). US keeps the old behavior
+                # until the 2026-09-01 A/B/C/D check-in; changing it now would alter
+                # frozen exit logic mid-validation.
+                arm_gain = (new_peak - ep) / ep if sym in CRYPTO_WATCHLIST else gain
+                if arm_gain >= TRAILING_TRIGGER and current <= trail_stop:
                     telegram_bot.send(
                         f"🔔 <b>Trail Stop — {sym}</b>\n\n"
                         f"<code>"
@@ -372,9 +378,11 @@ async def _build_crypto_snapshot(regime: dict, sgd_to_usd: float) -> list[dict]:
     for d in stock_data:
         symbol = d["symbol"]
         position = crypto_positions.get(symbol)
+        # BASELINE since 2026-07-13: drops the 20/50 SMA alignment gate —
+        # +5.0% vs +4.2% CAGR over COMBINED, consistent across 5 backtest configs
         signal = generate_signal(
             d["analysis"], position, regime, d["fundamentals"], d["rel_strength"],
-            rs_rank=None, sector_ok=None,
+            rs_rank=None, sector_ok=None, variant="BASELINE",
         )
         action = signal["action"]
         pos_size = None
