@@ -566,15 +566,24 @@ async def sgx_watcher():
 
                 if action in ACTIONABLE and action != prev:
                     order_note = ""
+                    # Sizing computed here so the alert shows it even when Futu
+                    # is down; the order path below re-caps by actual cash
+                    msg_pos = None
+                    if action == "BUY" and not position:
+                        risk_per_share = price - sgx_stop
+                        if risk_per_share > 0:
+                            risk_sgd = SGX_PORTFOLIO_SGD * RISK_PER_TRADE_PCT
+                            qty = max(1, int(risk_sgd / risk_per_share))
+                            qty = min(qty, int(SGX_PORTFOLIO_SGD * MAX_POSITION_PCT / price))
+                            if qty > 0:
+                                msg_pos = {"shares": qty,
+                                           "position_value_sgd": qty * price,
+                                           "risk_sgd": risk_sgd}
                     if futu_broker.is_available():
                         tag = " [PAPER]" if futu_broker.is_paper() else ""
                         if action == "BUY" and not position:
-                            stop           = sgx_stop
-                            risk_per_share = price - stop
-                            if risk_per_share > 0:
-                                risk_sgd = SGX_PORTFOLIO_SGD * RISK_PER_TRADE_PCT
-                                qty = max(1, int(risk_sgd / risk_per_share))
-                                qty = min(qty, int(SGX_PORTFOLIO_SGD * MAX_POSITION_PCT / price))
+                            if msg_pos:
+                                qty = int(msg_pos["shares"])
                                 # Cash-only: cap at 95% of available cash balance
                                 acct = futu_broker.get_account_summary()
                                 if acct["cash"]:
@@ -601,7 +610,8 @@ async def sgx_watcher():
                                 order_id = futu_broker.place_limit_order(symbol, qty, "SELL", price)
                                 order_note = f"\n🤖 Auto-order: SELL {qty} @ S${price:.3f}{tag}"
 
-                    msg = telegram_bot.format_signal(symbol, signal, d["analysis"], None, d["fundamentals"])
+                    msg = telegram_bot.format_signal(symbol, signal, d["analysis"], msg_pos, d["fundamentals"],
+                                                     stop=sgx_stop, target=sgx_target, market="SGX")
                     telegram_bot.send(msg + order_note)
                     _log_event("SGX", f"{action} {symbol} @ S${price:.3f} — {signal['suggested_action']}", sent=True)
 

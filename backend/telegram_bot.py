@@ -3,6 +3,8 @@ import json
 import urllib.request
 import logging
 
+from config import PROFIT_RATIO
+
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -68,17 +70,28 @@ def format_signal(
     analysis: dict,
     position_size: dict | None,
     fundamentals: dict | None = None,
+    stop: float | None = None,
+    target: float | None = None,
+    market: str = "US",
 ) -> str:
     action = signal["action"]
     price = analysis.get("price", 0)
     rsi = analysis.get("rsi")
     above_200 = analysis.get("above_200sma")
-    stop = analysis.get("stop_loss", 0)
-    target = analysis.get("profit_target", 0)
+    # Callers running a swing-stop variant (SGX) pass their own levels;
+    # everyone else falls back to the ATR-based analysis levels
+    stop = stop if stop is not None else analysis.get("stop_loss", 0)
+    target = target if target is not None else analysis.get("profit_target", 0)
     reason = signal["reasons"][0] if signal["reasons"] else ""
     is_crypto = position_size is not None and position_size.get("risk_sgd") is None
     trade_type = signal.get("trade_type", "")
     type_tag = f" · {trade_type}" if trade_type else ""
+
+    cur = "S$" if market == "SGX" else "$"
+    dp = 3 if market == "SGX" else 2
+
+    def money(v: float) -> str:
+        return f"{cur}{v:,.{dp}f}"
 
     HEADER = {
         "BUY":       f"🟢 <b>BUY — {symbol}{type_tag}</b>",
@@ -90,38 +103,54 @@ def format_signal(
     lines = [HEADER.get(action, f"⚪ <b>{action} — {symbol}</b>"), ""]
     lines.append(reason)
 
-    if action == "BUY" and position_size:
+    if action == "BUY":
         fund_line = ""
         if fundamentals and not fundamentals.get("is_etf"):
             grade = fundamentals.get("grade", "?")
             score = fundamentals.get("score", "?")
             fund_line = f"\nFundamentals  {grade} ({score}/5)"
 
-        stop_pct = _pct(stop, price)
-        target_pct = _pct(target, price)
-        risk_line = (
-            f"Risk     S${position_size['risk_sgd']:.0f}\n"
-            if position_size.get("risk_sgd") is not None
-            else ""
-        )
+        # Entry zone: signal price up to +0.25 ATR. Past that the fill drifts
+        # from the geometry the backtest validated — don't chase.
+        atr = analysis.get("atr") or 0
+        entry_hi = price + 0.25 * atr
+        # Stop is a fixed level; target scales with the actual fill
+        # (target = entry + PROFIT_RATIO × (entry − stop))
+        target_hi = entry_hi + PROFIT_RATIO * (entry_hi - stop)
+
+        if entry_hi > price:
+            entry_line = f"Entry    {money(price)} – {money(entry_hi)}\n"
+            stop_line = f"Stop     {money(stop)}  ({_pct(stop, price)} … {_pct(stop, entry_hi)})\n"
+            target_line = f"Target   {money(target)} – {money(target_hi)}  ({_pct(target, price)})\n"
+        else:
+            entry_line = f"Entry    {money(price)}\n"
+            stop_line = f"Stop     {money(stop)}  ({_pct(stop, price)})\n"
+            target_line = f"Target   {money(target)}  ({_pct(target, price)})\n"
+
+        size_lines = ""
+        if position_size:
+            size_lines = f"Shares   {position_size['shares']:g}  (S${position_size['position_value_sgd']:,.0f})\n"
+            if position_size.get("risk_sgd") is not None:
+                size_lines += f"Risk     S${position_size['risk_sgd']:,.0f}\n"
 
         lines += [
             fund_line,
             "",
             "<code>"
-            f"Price    ${price:.2f}\n"
-            f"Shares   {position_size['shares']:.4f}  (S${position_size['position_value_sgd']:.0f})\n"
-            f"Stop     ${stop:.2f}  ({stop_pct})\n"
-            f"Target   ${target:.2f}  ({target_pct})\n"
-            f"{risk_line}"
-            f"RSI      {_rsi_label(rsi)}\n"
-            f"Trend    {_trend(above_200)}"
-            "</code>",
+            + entry_line
+            + size_lines
+            + stop_line
+            + target_line
+            + f"RSI      {_rsi_label(rsi)}\n"
+            + f"Trend    {_trend(above_200)}"
+            + "</code>",
         ]
-        if position_size.get("note"):
+        if position_size and position_size.get("note"):
             lines.append(f"\n<i>{position_size['note']}</i>")
         if is_crypto:
             lines.append("\n⚡ Crypto — enter when ready (24/7 market)")
+        elif market == "SGX":
+            lines.append("\n⚡ SGX open now — limit order within the entry zone")
         else:
             lines.append("\n⚡ Execute at market open · Mon–Fri 9:30 AM ET")
 
@@ -129,7 +158,7 @@ def format_signal(
         lines += [
             "",
             "<code>"
-            f"Price    ${price:.2f}\n"
+            f"Price    {money(price)}\n"
             f"RSI      {_rsi_label(rsi)}\n"
             f"Trend    {_trend(above_200)}"
             "</code>",
@@ -141,9 +170,9 @@ def format_signal(
         lines += [
             "",
             "<code>"
-            f"Price    ${price:.2f}\n"
+            f"Price    {money(price)}\n"
             f"RSI      {_rsi_label(rsi)}\n"
-            f"Target   ${target:.2f}  ({_pct(target, price)})"
+            f"Target   {money(target)}  ({_pct(target, price)})"
             "</code>",
             "",
             "📋 Sell 50% at market open",
@@ -156,7 +185,7 @@ def format_signal(
         days_str = f"{days} days" if days is not None else "soon"
         lines += [
             "",
-            f"<code>Price    ${price:.2f}\nEarnings in {days_str}</code>",
+            f"<code>Price    {money(price)}\nEarnings in {days_str}</code>",
             "",
             f"⚠️ {signal['suggested_action']}",
         ]
