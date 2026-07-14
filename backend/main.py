@@ -177,6 +177,59 @@ def _seconds_until_next_open() -> float:
     return max((target - now).total_seconds(), 60)
 
 
+def _us_entry_confirm_window() -> bool:
+    """True in the last 30 min of the US session (15:30–16:00 ET). Entries are
+    only confirmed here: the backtest enters on the completed daily bar (close
+    above the Donchian band, full-day volume), while an all-day intraday check
+    fires on spikes that fade by the close and reads a partial-volume ratio —
+    a different trade distribution from the one that was validated. Exits are
+    still evaluated all session."""
+    now = datetime.now(ET)
+    start = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return start <= now < close
+
+
+def _sgx_entry_confirm_window() -> bool:
+    """True in the last 30 min of the SGX session (17:00–17:30 SGT) — same
+    close-confirmation rationale as the US window."""
+    now = datetime.now(SGT)
+    start = now.replace(hour=17, minute=0, second=0, microsecond=0)
+    close = now.replace(hour=17, minute=30, second=0, microsecond=0)
+    return start <= now < close
+
+
+def _us_equity_sgd(sgd_to_usd: float) -> float:
+    """Current equity of the shared US/crypto pool: the S$5k base plus realized
+    P&L from closed trades (USD-priced symbols; SGX has its own pool). The
+    backtest portfolio sim risks 1% of *current* equity — sizing off the fixed
+    base never compounds and diverges from the simulated numbers."""
+    try:
+        rows = db.fetch(
+            "SELECT shares, entry_price, exit_price FROM trades "
+            "WHERE exit_price IS NOT NULL AND (strategy IS NULL OR strategy != 'SGX')"
+        )
+        realized_usd = sum(r["shares"] * (r["exit_price"] - r["entry_price"]) for r in rows)
+        return PORTFOLIO_SIZE_SGD + (realized_usd / sgd_to_usd if sgd_to_usd else 0)
+    except Exception as e:
+        logging.warning(f"US equity calc failed, using fixed base: {e}")
+        return PORTFOLIO_SIZE_SGD
+
+
+def _sgx_equity_sgd() -> float:
+    """Current equity of the SGX pool (prices already in SGD)."""
+    try:
+        rows = db.fetch(
+            "SELECT shares, entry_price, exit_price FROM trades "
+            "WHERE exit_price IS NOT NULL AND strategy = 'SGX'"
+        )
+        realized = sum(r["shares"] * (r["exit_price"] - r["entry_price"]) for r in rows)
+        return SGX_PORTFOLIO_SGD + realized
+    except Exception as e:
+        logging.warning(f"SGX equity calc failed, using fixed base: {e}")
+        return SGX_PORTFOLIO_SGD
+
+
 def _sgx_market_is_open() -> bool:
     now = datetime.now(SGT)
     if now.weekday() >= 5:
@@ -211,8 +264,16 @@ async def signal_watcher():
                 "FROM trades WHERE exit_price IS NULL"
             )
             position_map: dict[str, dict] = {}
+            crypto_open: list[str] = []
             for row in open_rows:
                 sym = row["symbol"]
+                if sym in SGX_WATCHLIST:
+                    continue   # bare SGX codes aren't yfinance symbols; sgx_watcher owns them
+                if "-USD" in sym:
+                    # fetched for trailing-stop prices only — entry/exit signals for
+                    # crypto come from crypto_watcher (BTC regime, BASELINE variant)
+                    crypto_open.append(sym)
+                    continue
                 if sym not in position_map:
                     position_map[sym] = {"avg_cost": row["entry_price"], "shares": row["shares"],
                                          "entry_date": row.get("entry_date"),
@@ -220,16 +281,23 @@ async def signal_watcher():
                                          "profit_target": row.get("profit_target")}
 
             watchlist = db.get_watchlist()
-            all_symbols = list(dict.fromkeys(watchlist + list(position_map.keys())))
+            all_symbols = list(dict.fromkeys(watchlist + list(position_map.keys()) + crypto_open))
 
             stock_data = await _fetch_batch(all_symbols)
             rs_rank_map = _compute_rs_ranks(stock_data)
             batch_prices = {d["symbol"]: d["analysis"]["price"] for d in stock_data}
 
             # Pass 2: generate signals with RS rank + sector confirmation
+            entry_window = _us_entry_confirm_window()
             for d in stock_data:
                 symbol = d["symbol"]
+                if "-USD" in symbol:
+                    continue   # crypto: price fetched for trailing stops only
                 position = position_map.get(symbol)
+                # Entries confirm near the close only (backtest parity); exits
+                # on held positions are evaluated all session
+                if position is None and not entry_window:
+                    continue
                 # Prefer the wide screener-universe rank; watchlist-local rank is
                 # a poor percentile with so few symbols
                 rs_rank = _screener_rs_ranks.get(symbol, rs_rank_map.get(symbol))
@@ -246,7 +314,7 @@ async def signal_watcher():
                     pos_size = None
                     if action == "BUY":
                         pos_size = calculate_position_size(
-                            PORTFOLIO_SIZE_SGD, d["analysis"]["price"],
+                            _us_equity_sgd(sgd_to_usd), d["analysis"]["price"],
                             d["analysis"]["stop_loss"], sgd_to_usd, size_mult,
                         )
                         # Auto-register stop and target price alerts
@@ -441,7 +509,7 @@ async def _build_crypto_snapshot(regime: dict, sgd_to_usd: float) -> list[dict]:
             # Risk-based sizing like stocks (1% of portfolio at the stop),
             # capped at the crypto allocation limit
             dist = price - stop
-            risk_usd = PORTFOLIO_SIZE_SGD * sgd_to_usd * RISK_PER_TRADE_PCT
+            risk_usd = _us_equity_sgd(sgd_to_usd) * sgd_to_usd * RISK_PER_TRADE_PCT
             cap_usd = CRYPTO_POSITION_SGD * sgd_to_usd
             value_usd = min(risk_usd / dist * price, cap_usd) if dist > 0 else cap_usd
             qty = round(value_usd / price, 6)
@@ -549,10 +617,15 @@ async def sgx_watcher():
             yf_symbols = [s + ".SI" for s in SGX_WATCHLIST]
             sgx_data = await _fetch_batch(yf_symbols)
 
+            entry_window = _sgx_entry_confirm_window()
             for d in sgx_data:
                 yf_sym   = d["symbol"]
                 symbol   = yf_sym.replace(".SI", "")
                 position = sgx_position_map.get(symbol)
+                # Entries confirm in the last 30 min only (backtest enters on the
+                # completed daily bar); exits on held positions run all session
+                if position is None and not entry_window:
+                    continue
                 # SWING_LOW_NOCAP since 2026-07-13: on the 27-name universe the
                 # swing-low-stop geometry backtests at +6.5% CAGR vs +0.3% for
                 # COMBINED on the old 8-name list (see backtest.py runs)
@@ -573,9 +646,12 @@ async def sgx_watcher():
                     if action == "BUY" and not position:
                         risk_per_share = price - sgx_stop
                         if risk_per_share > 0:
-                            risk_sgd = SGX_PORTFOLIO_SGD * RISK_PER_TRADE_PCT
+                            # Risk 1% of current SGX equity (base + realized P&L)
+                            # so sizing compounds like the backtest portfolio sim
+                            sgx_equity = _sgx_equity_sgd()
+                            risk_sgd = sgx_equity * RISK_PER_TRADE_PCT
                             qty = max(1, int(risk_sgd / risk_per_share))
-                            qty = min(qty, int(SGX_PORTFOLIO_SGD * MAX_POSITION_PCT / price))
+                            qty = min(qty, int(sgx_equity * MAX_POSITION_PCT / price))
                             if qty > 0:
                                 msg_pos = {"shares": qty,
                                            "position_value_sgd": qty * price,
@@ -604,12 +680,53 @@ async def sgx_watcher():
                                         db.add_price_alert(yf_sym, sgx_stop,   "below", source="trade")
                                         db.add_price_alert(yf_sym, sgx_target, "above", source="trade")
 
-                        elif action in ("SELL", "SELL_HALF") and position:
-                            shares = position["shares"]
-                            qty    = int(shares * 0.5) if action == "SELL_HALF" else int(shares)
+                        elif action == "SELL" and position:
+                            qty = int(position["shares"])
                             if qty > 0:
                                 order_id = futu_broker.place_limit_order(symbol, qty, "SELL", price)
                                 order_note = f"\n🤖 Auto-order: SELL {qty} @ S${price:.3f}{tag}"
+                                if order_id:
+                                    # Close the DB row — leaving it open kept the
+                                    # position "held" forever and could re-fire a
+                                    # SELL for shares no longer owned
+                                    db.mutate(
+                                        "UPDATE trades SET exit_price = ?, exit_date = ? "
+                                        "WHERE symbol = ? AND exit_price IS NULL",
+                                        (price, datetime.today().strftime("%Y-%m-%d"), symbol),
+                                    )
+                                    db.remove_trade_alerts(yf_sym)
+
+                        elif action == "SELL_HALF" and position:
+                            trade = db.fetchone(
+                                "SELECT id, shares, entry_price, entry_date, half_sold "
+                                "FROM trades WHERE symbol = ? AND exit_price IS NULL",
+                                (symbol,),
+                            )
+                            qty = int(trade["shares"] * 0.5) if trade and not trade.get("half_sold") else 0
+                            if qty > 0:
+                                order_id = futu_broker.place_limit_order(symbol, qty, "SELL", price)
+                                order_note = f"\n🤖 Auto-order: SELL {qty} @ S${price:.3f}{tag}"
+                                if order_id:
+                                    today_str = datetime.today().strftime("%Y-%m-%d")
+                                    # Record the sold half as a closed row so realized
+                                    # P&L is preserved, then keep the remainder open
+                                    # with half_sold=1 + breakeven stop (matches the
+                                    # US flow and the backtest exit sequence)
+                                    db.mutate(
+                                        "INSERT INTO trades (symbol, shares, entry_date, entry_price, exit_date, exit_price, signal_reason, strategy) "
+                                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                        (symbol, qty, trade["entry_date"], trade["entry_price"],
+                                         today_str, price, "SGX Auto-SELL_HALF", "SGX"),
+                                    )
+                                    db.mutate(
+                                        "UPDATE trades SET shares = shares - ?, half_sold = 1, "
+                                        "peak_price = ?, stop_loss = ? WHERE id = ?",
+                                        (qty, price, trade["entry_price"], trade["id"]),
+                                    )
+                                    db.mutate(
+                                        "UPDATE price_alerts SET target = ? WHERE symbol = ? AND direction = 'below'",
+                                        (trade["entry_price"], yf_sym),
+                                    )
 
                     msg = telegram_bot.format_signal(symbol, signal, d["analysis"], msg_pos, d["fundamentals"],
                                                      stop=sgx_stop, target=sgx_target, market="SGX")
@@ -617,6 +734,57 @@ async def sgx_watcher():
                     _log_event("SGX", f"{action} {symbol} @ S${price:.3f} — {signal['suggested_action']}", sent=True)
 
                 _remember_signal(_last_sgx_signals, "SGX", symbol, action)
+
+            # Trailing stop on half-sold SGX positions — was only wired for US
+            # trades, so the remaining half of an SGX winner had no exit manager.
+            # Arms on current gain (non-persistent), matching the backtest
+            # geometry variant D was validated with.
+            sgx_prices = {d["symbol"].replace(".SI", ""): d["analysis"]["price"]
+                          for d in sgx_data}
+            half_rows = db.fetch(
+                "SELECT * FROM trades WHERE exit_price IS NULL AND half_sold = 1 AND strategy = 'SGX'"
+            )
+            for trade in half_rows:
+                sym = trade["symbol"]
+                current = sgx_prices.get(sym)
+                if current is None:
+                    continue
+                ep = trade["entry_price"]
+                peak = trade["peak_price"] or ep
+                new_peak = max(peak, current)
+                if new_peak != peak:
+                    db.mutate("UPDATE trades SET peak_price = ? WHERE id = ?",
+                              (new_peak, trade["id"]))
+                gain = (current - ep) / ep
+                trail_stop = new_peak * (1 - TRAILING_STOP_PCT)
+                if gain >= TRAILING_TRIGGER and current <= trail_stop:
+                    qty = int(trade["shares"])
+                    order_note = ""
+                    if futu_broker.is_available() and qty > 0:
+                        order_id = futu_broker.place_limit_order(sym, qty, "SELL", current)
+                        if order_id:
+                            tag = " [PAPER]" if futu_broker.is_paper() else ""
+                            order_note = f"\n🤖 Auto-order: SELL {qty} @ S${current:.3f}{tag}"
+                            db.mutate(
+                                "UPDATE trades SET exit_price = ?, exit_date = ? WHERE id = ?",
+                                (current, datetime.today().strftime("%Y-%m-%d"), trade["id"]),
+                            )
+                            db.remove_trade_alerts(sym + ".SI")
+                    telegram_bot.send(
+                        f"🔔 <b>Trail Stop — {sym} (SGX)</b>\n\n"
+                        f"<code>"
+                        f"Price    S${current:.3f}\n"
+                        f"Trail    S${trail_stop:.3f}  (10% below peak)\n"
+                        f"Peak     S${new_peak:.3f}\n"
+                        f"Entry    S${ep:.3f}  ({gain*100:.1f}% gain)"
+                        f"</code>\n\n"
+                        f"Close remaining half.{order_note}"
+                    )
+                    _log_event("SGX", f"Trail stop {sym} — close remaining half at S${current:.3f}", sent=True)
+                    if not order_note:
+                        # Futu down / order rejected — mark alerted (half_sold=2,
+                        # same as the US flow) so this doesn't re-fire every cycle
+                        db.mutate("UPDATE trades SET half_sold = 2 WHERE id = ?", (trade["id"],))
 
         except Exception as e:
             logging.warning(f"SGX watcher error: {e}")
@@ -744,6 +912,9 @@ async def handle_telegram_command(text: str):
         try:
             loop = asyncio.get_event_loop()
             regime = await asyncio.wait_for(loop.run_in_executor(None, get_market_regime), timeout=20)
+            # Same BTC-based gate as crypto_watcher — SPY regime here made the
+            # on-demand digest disagree with the watcher's entries
+            regime = await asyncio.wait_for(loop.run_in_executor(None, get_crypto_regime, regime), timeout=20)
             sgd_to_usd = regime.get("sgd_to_usd", 0.74)
             rows = await asyncio.wait_for(_build_crypto_snapshot(regime, sgd_to_usd), timeout=45)
             telegram_bot.send(telegram_bot.format_crypto_digest(rows, sgd_to_usd))

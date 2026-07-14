@@ -668,12 +668,16 @@ def _run(symbol: str, df: pd.DataFrame, entry_fn: callable,
                     _record("time_stop", price, pos["shares"])
                     pos = None
             else:
-                # Second half — track peak and apply trailing stop once 15% gain
-                pos["peak"] = max(pos.get("peak", ep), price)
+                # Second half — track peak and apply trailing stop once 15% gain.
+                # Breach tests use the PRIOR bar's peak: today's low can print
+                # before today's high, so trailing off the same-bar peak looks
+                # ahead within the bar and flatters trail-stop exits.
+                prev_peak = pos.get("peak", ep)
+                pos["peak"] = max(prev_peak, price)
                 gain = (price - ep) / ep
-                arm_gain = (pos["peak"] - ep) / ep if PERSISTENT_TRAIL else gain
+                arm_gain = (prev_peak - ep) / ep if PERSISTENT_TRAIL else gain
                 if arm_gain >= TRAILING_TRIGGER:
-                    trail_stop = pos["peak"] * (1 - TRAILING_STOP_PCT)
+                    trail_stop = prev_peak * (1 - TRAILING_STOP_PCT)
                     if low_px <= trail_stop:
                         _record("trail_stop", min(open_px, trail_stop), pos["shares"])
                         pos = None
@@ -1014,6 +1018,7 @@ PF_RISK_PCT    = 0.01     # risk 1% of current equity per trade
 PF_MAX_POS_PCT = 0.10     # max 10% of equity per position
 PF_MIN_CASH_PCT = 0.10    # keep 10% of equity in cash
 PF_COST = SLIPPAGE_PCT + COMMISSION_PCT   # applied to each fill
+LOT_SIZE = 1              # --lot-size: board lot (SGX = 100); sim rounds down to whole lots
 
 
 def _run_portfolio(prepared_dfs: dict[str, pd.DataFrame], entry_fn, filters_fn,
@@ -1086,11 +1091,13 @@ def _run_portfolio(prepared_dfs: dict[str, pd.DataFrame], entry_fn, filters_fn,
                     _close(sym, pos, price, 1.0, "time_stop", date)
                     del positions[sym]
             else:
-                pos["peak"] = max(pos["peak"], price)
+                # Prior-bar peak for breach tests — same no-look-ahead rule as _run
+                prev_peak = pos["peak"]
+                pos["peak"] = max(prev_peak, price)
                 gain = (price - ep) / ep
-                arm_gain = (pos["peak"] - ep) / ep if PERSISTENT_TRAIL else gain
-                if arm_gain >= TRAILING_TRIGGER and low_px <= pos["peak"] * (1 - TRAILING_STOP_PCT):
-                    _close(sym, pos, min(open_px, pos["peak"] * (1 - TRAILING_STOP_PCT)), 1.0, "trail_stop", date)
+                arm_gain = (prev_peak - ep) / ep if PERSISTENT_TRAIL else gain
+                if arm_gain >= TRAILING_TRIGGER and low_px <= prev_peak * (1 - TRAILING_STOP_PCT):
+                    _close(sym, pos, min(open_px, prev_peak * (1 - TRAILING_STOP_PCT)), 1.0, "trail_stop", date)
                     del positions[sym]
                 elif weeks >= MAX_HOLD_WEEKS and gain * 100 < 5:
                     _close(sym, pos, price, 1.0, "time_stop", date)
@@ -1132,6 +1139,13 @@ def _run_portfolio(prepared_dfs: dict[str, pd.DataFrame], entry_fn, filters_fn,
                 skipped_capital += 1
                 continue
             shares = pos_value / price
+            if LOT_SIZE > 1:
+                # Whole board lots only — a lot that exceeds the position budget
+                # means the signal can't actually be taken at this account size
+                shares = int(shares // LOT_SIZE) * LOT_SIZE
+                if shares <= 0:
+                    skipped_capital += 1
+                    continue
             fill = price * (1 + PF_COST)
             cash -= shares * fill
             positions[sym] = {
@@ -1301,9 +1315,20 @@ def main():
                         help="Override the time stop (default 8 weeks)")
     parser.add_argument("--persistent-trail", action="store_true",
                         help="Trailing stop arms off peak gain and stays armed (tests the live de-arm quirk)")
+    parser.add_argument("--slippage", type=float, default=None,
+                        help="Slippage per leg as a fraction (default 0.001 = 0.1%%). Use ~0.005 for SGX mid-caps/REITs")
+    parser.add_argument("--lot-size", type=int, default=None,
+                        help="Board lot size for the portfolio sim (SGX = 100). Positions round down to whole lots")
     args = parser.parse_args()
 
-    global PROFIT_RATIO, MAX_HOLD_WEEKS, PERSISTENT_TRAIL
+    global PROFIT_RATIO, MAX_HOLD_WEEKS, PERSISTENT_TRAIL, SLIPPAGE_PCT, PF_COST, LOT_SIZE
+    if args.slippage is not None:
+        SLIPPAGE_PCT = args.slippage
+        PF_COST = SLIPPAGE_PCT + COMMISSION_PCT
+        print(f"Slippage override: {SLIPPAGE_PCT*100:.2f}% per leg")
+    if args.lot_size and args.lot_size > 1:
+        LOT_SIZE = args.lot_size
+        print(f"Board lot size: {LOT_SIZE} shares (portfolio sim sizing)")
     if args.profit_ratio:
         PROFIT_RATIO = args.profit_ratio
         print(f"Profit ratio override: {PROFIT_RATIO}:1")

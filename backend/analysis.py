@@ -16,9 +16,11 @@ SECTOR_ETF_MAP = {
     "Financials":             "XLF",
     "Financial Services":     "XLF",
     "Consumer Discretionary": "XLY",
+    "Consumer Cyclical":      "XLY",   # yfinance's actual label for discretionary
     "Communication Services": "XLC",
     "Industrials":            "XLI",
     "Consumer Staples":       "XLP",
+    "Consumer Defensive":     "XLP",   # yfinance's actual label for staples
     "Energy":                 "XLE",
     "Utilities":              "XLU",
     "Real Estate":            "XLRE",
