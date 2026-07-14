@@ -1448,7 +1448,7 @@ async def health():
     # so heavy watcher scans on the tiny free-tier CPU never make the
     # app look dead to Render or UptimeRobot. Accepts HEAD because
     # UptimeRobot pings with HEAD by default.
-    return {"ok": True}
+    return {"ok": True, "commit": os.getenv("RENDER_GIT_COMMIT", "")[:7]}
 
 
 @app.get("/api/status")
