@@ -54,6 +54,17 @@ def _drain_events(market: str) -> list[dict]:
     return drained
 
 
+# Watcher liveness — last time each watcher completed a scan pass (and, for the
+# market watchers, a pass inside the entry-confirm window). Surfaced in /health
+# so "did the watcher run through the entry window" is answerable without
+# Render log access; /health stays zero-work (in-memory dict read).
+_heartbeats: dict[str, str] = {}
+
+
+def _beat(name: str) -> None:
+    _heartbeats[name] = datetime.now(SGT).isoformat(timespec="seconds")
+
+
 def _us_alert_window() -> bool:
     """First 2 hours after the US open — 21:30–23:30 SGT (DST), when the user is
     awake to act. Entry alerts outside this window queue into the 7:30 AM SGT
@@ -465,6 +476,10 @@ async def signal_watcher():
                         _log_event(market, f"Price alert {alert['symbol']} {arrow} ${alert['target']:.2f} (now ${current:.2f})", sent=True)
                     db.remove_price_alert(alert["id"])
 
+            _beat("us_scan")
+            if entry_window:
+                _beat("us_entry_scan")
+
         except Exception as e:
             logging.warning(f"Signal watcher error: {e}")
 
@@ -579,6 +594,8 @@ async def crypto_watcher():
             if cycle >= DIGEST_EVERY:
                 cycle = 0
                 telegram_bot.send(telegram_bot.format_crypto_digest(rows, sgd_to_usd))
+
+            _beat("crypto_scan")
 
         except Exception as e:
             logging.warning(f"Crypto watcher error: {e}")
@@ -728,6 +745,25 @@ async def sgx_watcher():
                                         (trade["entry_price"], yf_sym),
                                     )
 
+                    # Signal-vs-fill log: the SGX backtest edge dies at 0.5%
+                    # slippage/leg, so every order-type alert records its signal
+                    # price for /fill to report the real moomoo fill against.
+                    # REVIEW is actionable but isn't an order — nothing to fill.
+                    if action in ("BUY", "SELL", "SELL_HALF"):
+                        try:
+                            if action == "BUY":
+                                fill_qty = msg_pos["shares"] if msg_pos else None
+                            elif action == "SELL_HALF" and position:
+                                fill_qty = int(position["shares"] * 0.5)
+                            else:
+                                fill_qty = position["shares"] if position else None
+                            db.add_pending_fill(symbol, action, price, fill_qty, sgx_stop, sgx_target,
+                                                datetime.now(SGT).isoformat(timespec="seconds"))
+                            if not futu_broker.is_available():
+                                order_note += f"\n📝 After placing in moomoo, reply: /fill {symbol} &lt;fill price&gt;"
+                        except Exception as e:
+                            logging.warning(f"SGX pending-fill log failed for {symbol}: {e}")
+
                     msg = telegram_bot.format_signal(symbol, signal, d["analysis"], msg_pos, d["fundamentals"],
                                                      stop=sgx_stop, target=sgx_target, market="SGX")
                     telegram_bot.send(msg + order_note)
@@ -770,6 +806,14 @@ async def sgx_watcher():
                                 (current, datetime.today().strftime("%Y-%m-%d"), trade["id"]),
                             )
                             db.remove_trade_alerts(sym + ".SI")
+                    fill_note = ""
+                    try:
+                        db.add_pending_fill(sym, "SELL", current, qty, None, None,
+                                            datetime.now(SGT).isoformat(timespec="seconds"))
+                        if not order_note:
+                            fill_note = f"\n📝 After placing in moomoo, reply: /fill {sym} &lt;fill price&gt;"
+                    except Exception as e:
+                        logging.warning(f"SGX pending-fill log failed for {sym}: {e}")
                     telegram_bot.send(
                         f"🔔 <b>Trail Stop — {sym} (SGX)</b>\n\n"
                         f"<code>"
@@ -778,13 +822,17 @@ async def sgx_watcher():
                         f"Peak     S${new_peak:.3f}\n"
                         f"Entry    S${ep:.3f}  ({gain*100:.1f}% gain)"
                         f"</code>\n\n"
-                        f"Close remaining half.{order_note}"
+                        f"Close remaining half.{order_note}{fill_note}"
                     )
                     _log_event("SGX", f"Trail stop {sym} — close remaining half at S${current:.3f}", sent=True)
                     if not order_note:
                         # Futu down / order rejected — mark alerted (half_sold=2,
                         # same as the US flow) so this doesn't re-fire every cycle
                         db.mutate("UPDATE trades SET half_sold = 2 WHERE id = ?", (trade["id"],))
+
+            _beat("sgx_scan")
+            if entry_window:
+                _beat("sgx_entry_scan")
 
         except Exception as e:
             logging.warning(f"SGX watcher error: {e}")
@@ -831,6 +879,7 @@ async def news_watcher():
                     display_symbol, pct_change, price, headlines, detected_at
                 ))
                 logging.info(f"News digest stored for {display_symbol}: {pct_change:+.1f}%")
+            _beat("news_scan")
         except Exception as e:
             logging.warning(f"News watcher error: {e}")
 
@@ -884,6 +933,156 @@ class OptionsTradeClose(BaseModel):
     notes: str | None = None
 
 
+def _median(vals: list[float]) -> float:
+    s = sorted(vals)
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def _slippage_verdict(mean_slip: float, n: int) -> str:
+    # Decision thresholds from the 2026-07-14 cost-reality backtest: the SGX
+    # edge is −1.5% CAGR at 0.5% slippage/leg; ~0.2% is the go/no-go line
+    if n < 5:
+        return f"📊 {n} fill(s) — need ~5+ before trusting the average."
+    if mean_slip > 0.2:
+        return ("❌ Mean slippage over the 0.2% threshold — SGX edge likely gone. "
+                "Cut universe to liquid names (D05/O39/U11/Z74/C6L) or shelve SGX.")
+    if mean_slip > 0.1:
+        return "⚠️ Mean slippage 0.1–0.2% — edge thinning, keep measuring."
+    return "✓ Mean slippage under 0.1% — execution cost is not killing the edge so far."
+
+
+def _format_slippage_report(fills: list[dict]) -> str:
+    if not fills:
+        return ("📐 <b>SGX Fill Slippage</b>\n\nNo fills recorded yet. When an SGX order "
+                "alert fires, place the paper trade in moomoo and reply:\n"
+                "<code>/fill D05 33.45 [qty]</code>")
+    slips = [f["slippage_pct"] for f in fills]
+    mean_slip = sum(slips) / len(slips)
+    worst = max(slips)
+    lines = [
+        "📐 <b>SGX Fill Slippage</b>  (adverse = positive)",
+        "",
+        f"<code>Fills   {len(slips)}\n"
+        f"Mean    {mean_slip:+.2f}%\n"
+        f"Median  {_median(slips):+.2f}%\n"
+        f"Worst   {worst:+.2f}%</code>",
+        "",
+    ]
+    by_sym: dict[str, list[float]] = {}
+    for f in fills:
+        by_sym.setdefault(f["symbol"], []).append(f["slippage_pct"])
+    for sym in sorted(by_sym):
+        s = by_sym[sym]
+        lines.append(f"<code>{sym:<5} n={len(s)}  mean {sum(s)/len(s):+.2f}%</code>")
+    lines += ["", _slippage_verdict(mean_slip, len(slips))]
+    return "\n".join(lines)
+
+
+async def _record_sgx_fill(symbol: str, fill_price: float, fill_qty: float | None):
+    """Match a reported moomoo fill to the latest pending SGX signal, log the
+    slippage, and do the trade bookkeeping the Futu auto-path would have done
+    (it never runs on Render — OpenD is a desktop app on localhost)."""
+    pending = db.get_pending_fill(symbol)
+    if not pending:
+        telegram_bot.send(
+            f"❌ No unfilled SGX order alert for <b>{symbol}</b>.\n"
+            "/fill matches the most recent alert that hasn't been reported yet."
+        )
+        return
+
+    side = pending["side"]
+    signal_price = pending["signal_price"]
+    # Adverse-positive: paying up on a BUY or getting less on a SELL is positive
+    if side == "BUY":
+        slip = (fill_price - signal_price) / signal_price * 100
+    else:
+        slip = (signal_price - fill_price) / signal_price * 100
+
+    now_sgt = datetime.now(SGT)
+    qty = fill_qty if fill_qty is not None else pending.get("signal_qty")
+    db.record_fill(pending["id"], fill_price, qty, round(slip, 4),
+                   now_sgt.isoformat(timespec="seconds"))
+
+    stale_note = ""
+    try:
+        age = now_sgt - datetime.fromisoformat(pending["signal_ts"])
+        if age > timedelta(days=2):
+            stale_note = f"\n⚠️ Signal was {age.days}d ago — matched the right alert?"
+    except (ValueError, TypeError):
+        pass
+
+    yf_sym = symbol + ".SI"
+    today_str = now_sgt.strftime("%Y-%m-%d")
+    book_note = ""
+    if side == "BUY":
+        if qty:
+            db.mutate(
+                "INSERT INTO trades (symbol, shares, entry_date, entry_price, signal_reason, notes, strategy, stop_loss, profit_target) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (symbol, int(qty), today_str, fill_price, "SGX Manual-BUY (paper)",
+                 f"/fill vs signal S${signal_price:.3f}", "SGX",
+                 pending.get("stop_loss"), pending.get("profit_target")),
+            )
+            if pending.get("stop_loss"):
+                db.add_price_alert(yf_sym, pending["stop_loss"], "below", source="trade")
+            if pending.get("profit_target"):
+                db.add_price_alert(yf_sym, pending["profit_target"], "above", source="trade")
+            book_note = f"\n📋 Open trade logged: {int(qty)} {symbol} @ S${fill_price:.3f}"
+        else:
+            book_note = (f"\n⚠️ No qty given and none suggested — trade row NOT created. "
+                         f"Log it with qty: /fill {symbol} {fill_price} 100")
+    elif side == "SELL":
+        db.mutate(
+            "UPDATE trades SET exit_price = ?, exit_date = ? WHERE symbol = ? AND exit_price IS NULL",
+            (fill_price, today_str, symbol),
+        )
+        db.remove_trade_alerts(yf_sym)
+        book_note = f"\n📋 Closed {symbol} @ S${fill_price:.3f}"
+    elif side == "SELL_HALF":
+        trade = db.fetchone(
+            "SELECT id, shares, entry_price, entry_date, half_sold "
+            "FROM trades WHERE symbol = ? AND exit_price IS NULL",
+            (symbol,),
+        )
+        if trade and not trade.get("half_sold"):
+            sell_qty = int(qty) if qty else int(trade["shares"] * 0.5)
+            db.mutate(
+                "INSERT INTO trades (symbol, shares, entry_date, entry_price, exit_date, exit_price, signal_reason, strategy) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (symbol, sell_qty, trade["entry_date"], trade["entry_price"],
+                 today_str, fill_price, "SGX Manual-SELL_HALF (paper)", "SGX"),
+            )
+            db.mutate(
+                "UPDATE trades SET shares = shares - ?, half_sold = 1, "
+                "peak_price = ?, stop_loss = ? WHERE id = ?",
+                (sell_qty, fill_price, trade["entry_price"], trade["id"]),
+            )
+            db.mutate(
+                "UPDATE price_alerts SET target = ? WHERE symbol = ? AND direction = 'below'",
+                (trade["entry_price"], yf_sym),
+            )
+            book_note = (f"\n📋 Sold half ({sell_qty}) @ S${fill_price:.3f}; "
+                         f"remainder on breakeven stop S${trade['entry_price']:.3f}")
+        else:
+            book_note = "\n⚠️ No un-halved open trade found — bookkeeping skipped."
+
+    fills = db.get_recorded_fills()
+    slips = [f["slippage_pct"] for f in fills]
+    mean_slip = sum(slips) / len(slips)
+    telegram_bot.send(
+        f"✅ <b>Fill recorded — {side} {symbol}</b>\n\n"
+        f"<code>"
+        f"Signal  S${signal_price:.3f}\n"
+        f"Fill    S${fill_price:.3f}\n"
+        f"Slip    {slip:+.2f}%  (adverse = positive)"
+        f"</code>\n\n"
+        f"Running: n={len(slips)}, mean {mean_slip:+.2f}%, median {_median(slips):+.2f}%\n"
+        f"{_slippage_verdict(mean_slip, len(slips))}"
+        f"{book_note}{stale_note}"
+    )
+
+
 async def handle_telegram_command(text: str):
     parts = text.strip().split()
     cmd = parts[0].lower().split("@")[0]
@@ -897,7 +1096,9 @@ async def handle_telegram_command(text: str):
             "/signal AAPL — current signal for any ticker\n"
             "/share AAPL — shareable summary to send to friends\n"
             "/positions — your open trades with live P&L\n"
-            "/briefing — send today's morning briefing now\n"
+            "/briefing — send the US pre-open briefing now\n"
+            "/fill D05 33.45 — report your moomoo fill for the last SGX alert\n"
+            "/slippage — SGX signal-vs-fill slippage report\n"
             "/alert AAPL 200 — notify when price crosses a level\n"
             "/alerts — list active price alerts\n"
             "/removealert 1 — remove alert by ID\n"
@@ -932,6 +1133,37 @@ async def handle_telegram_command(text: str):
         except Exception as e:
             logging.warning(f"/briefing error: {e}")
             telegram_bot.send(f"❌ Briefing failed — check backend logs.\n<code>{e}</code>")
+
+    elif cmd == "/fill":
+        # Report the real moomoo paper fill for the latest SGX order alert:
+        # /fill D05 33.45 [qty]. Records slippage vs signal price and does the
+        # trade bookkeeping the Futu auto-path would have done (open/close/split)
+        # so exits stay tracked while the system is alerts-only.
+        if len(parts) < 3:
+            telegram_bot.send("Usage: /fill D05 33.45 [qty]")
+            return
+        symbol = parts[1].upper().replace(".SI", "")
+        try:
+            fill_price = float(parts[2])
+            fill_qty = float(parts[3]) if len(parts) > 3 else None
+            if fill_price <= 0 or (fill_qty is not None and fill_qty <= 0):
+                raise ValueError
+        except ValueError:
+            telegram_bot.send("Usage: /fill D05 33.45 [qty] — price and qty must be positive numbers")
+            return
+        try:
+            await _record_sgx_fill(symbol, fill_price, fill_qty)
+        except Exception as e:
+            logging.warning(f"/fill error: {e}")
+            telegram_bot.send(f"❌ Fill not recorded.\n<code>{e}</code>")
+
+    elif cmd == "/slippage":
+        try:
+            fills = db.get_recorded_fills()
+            telegram_bot.send(_format_slippage_report(fills))
+        except Exception as e:
+            logging.warning(f"/slippage error: {e}")
+            telegram_bot.send(f"❌ Slippage report failed.\n<code>{e}</code>")
 
     elif cmd == "/scan":
         telegram_bot.send("🔍 Scanning 70 stocks — this takes ~30s…")
@@ -1620,7 +1852,7 @@ async def health():
     # so heavy watcher scans on the tiny free-tier CPU never make the
     # app look dead to Render or UptimeRobot. Accepts HEAD because
     # UptimeRobot pings with HEAD by default.
-    return {"ok": True, "commit": os.getenv("RENDER_GIT_COMMIT", "")[:7]}
+    return {"ok": True, "commit": os.getenv("RENDER_GIT_COMMIT", "")[:7], "scans": _heartbeats}
 
 
 @app.get("/api/status")

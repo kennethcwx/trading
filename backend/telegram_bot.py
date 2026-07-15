@@ -485,10 +485,8 @@ def format_morning_briefing(
     size_warn = "  ⚠️ half size" if mult < 1 else ""
 
     lines = [
-        f"🌅 <b>Morning Briefing — {date_str}</b>",
-        "",
-        f"📅 US market opens today",
-        f"   <code>9:30 AM ET  ·  {open_time_sgt} SGT</code>",
+        f"🇺🇸 <b>US Pre-Open — {date_str}</b>",
+        f"Opens tonight <code>{open_time_sgt} SGT</code> ({open_time_et} ET)",
         "",
         "📊 <b>Market</b>",
         "<code>"
@@ -497,6 +495,16 @@ def format_morning_briefing(
         f"SGD/USD  {sgd:.4f}"
         "</code>",
     ]
+
+    # Entries only confirm in the last 30 min of the session and queue into the
+    # 7:30 AM summary — this pre-open recheck is the action point, so it leads.
+    lines += ["", f"⚡ <b>Act at open ({open_time_sgt} SGT)</b>"]
+    if actionable_signals:
+        for s in actionable_signals:
+            lines.append(f"• <b>{s['action'].replace('_', ' ')} {s['symbol']}</b> — {s['reason']}")
+        lines.append("<i>Re-checked against the latest completed close — a queued entry from the 7:30 AM summary that isn't listed here is no longer valid.</i>")
+    else:
+        lines.append("• Nothing to do — hold positions as planned")
 
     if open_trades:
         lines += ["", f"📋 <b>Open Positions ({len(open_trades)})</b>"]
@@ -511,13 +519,6 @@ def format_morning_briefing(
                 lines.append(f"<code>{t['symbol']:<6}  {t['shares']:.2f}sh  in ${t['entry_price']:.2f}</code>")
     else:
         lines += ["", "📋 <b>Open Positions</b>  none"]
-
-    lines += ["", "⚡ <b>Act at market open (9:30 AM ET)</b>"]
-    if actionable_signals:
-        for s in actionable_signals:
-            lines.append(f"• <b>{s['action'].replace('_', ' ')} {s['symbol']}</b> — {s['reason']}")
-    else:
-        lines.append("• Nothing to do — hold positions as planned")
 
     if watch_signals:
         lines += ["", "👀 <b>Watch closely</b>"]
@@ -544,11 +545,13 @@ def set_bot_commands() -> bool:
     commands = [
         {"command": "scan",         "description": "Scan 70 stocks for BUY setups + wheel opportunities"},
         {"command": "crypto",      "description": "Current signal for BTC, ETH, SOL"},
-        {"command": "briefing",    "description": "Send today's morning briefing now"},
+        {"command": "briefing",    "description": "Send the US pre-open briefing now"},
         {"command": "signal",      "description": "Signal for any ticker — /signal AAPL"},
         {"command": "share",       "description": "Shareable summary for friends — /share AAPL"},
         {"command": "positions",   "description": "Open trades with live P&L"},
         {"command": "pnl",         "description": "Total realized + unrealized P&L"},
+        {"command": "fill",        "description": "Report moomoo fill for the last SGX alert — /fill D05 33.45"},
+        {"command": "slippage",    "description": "SGX signal-vs-fill slippage report"},
         {"command": "alert",       "description": "Set price alert — /alert AAPL 200"},
         {"command": "alerts",      "description": "List active price alerts"},
         {"command": "removealert", "description": "Remove alert by ID — /removealert 1"},
