@@ -436,8 +436,9 @@ async def signal_watcher():
                 # frozen exit logic mid-validation.
                 arm_gain = (new_peak - ep) / ep if sym in CRYPTO_WATCHLIST else gain
                 if arm_gain >= TRAILING_TRIGGER and current <= trail_stop:
+                    flag = telegram_bot.MARKET_ICON["CRYPTO" if sym in CRYPTO_WATCHLIST else "US"]
                     telegram_bot.send(
-                        f"🔔 <b>Trail Stop — {sym}</b>\n\n"
+                        f"🔔 <b>Trail Stop — {sym}</b> · {flag}\n\n"
                         f"<code>"
                         f"Price    ${current:.2f}\n"
                         f"Trail    ${trail_stop:.2f}  (10% below peak)\n"
@@ -464,11 +465,14 @@ async def signal_watcher():
                 )
                 if hit:
                     arrow = "↑" if alert["direction"] == "above" else "↓"
+                    alert_market = telegram_bot.market_of(alert["symbol"])
+                    money = telegram_bot.money_for(alert_market)
+                    display = alert["symbol"].replace(".SI", "")
                     telegram_bot.send(
-                        f"🔔 <b>Price Alert — {alert['symbol']}</b>\n\n"
+                        f"🔔 <b>Price Alert — {display}</b> · {telegram_bot.MARKET_ICON[alert_market]}\n\n"
                         f"<code>"
-                        f"Target   ${alert['target']:.2f}  {arrow}\n"
-                        f"Current  ${current:.2f}"
+                        f"Target   {money(alert['target'])}  {arrow}\n"
+                        f"Current  {money(current)}"
                         f"</code>"
                     )
                     if alert["symbol"] not in CRYPTO_WATCHLIST:
@@ -572,7 +576,8 @@ async def crypto_watcher():
                     # Immediate alert: new BUY signal
                     if action == "BUY" and not r["position"]:
                         msg = telegram_bot.format_signal(
-                            symbol, r["signal"], r["analysis"], r["pos_size"], r["fundamentals"]
+                            symbol, r["signal"], r["analysis"], r["pos_size"], r["fundamentals"],
+                            market="CRYPTO",
                         )
                         telegram_bot.send(msg)
                         stop   = r["analysis"]["stop_loss"]
@@ -583,7 +588,8 @@ async def crypto_watcher():
                     # Immediate alert: exit signal on a held position — don't wait for digest
                     elif r["position"] and action in ("SELL", "SELL_HALF", "REVIEW"):
                         msg = telegram_bot.format_signal(
-                            symbol, r["signal"], r["analysis"], None, r["fundamentals"]
+                            symbol, r["signal"], r["analysis"], None, r["fundamentals"],
+                            market="CRYPTO",
                         )
                         telegram_bot.send(msg)
 
@@ -815,7 +821,7 @@ async def sgx_watcher():
                     except Exception as e:
                         logging.warning(f"SGX pending-fill log failed for {sym}: {e}")
                     telegram_bot.send(
-                        f"🔔 <b>Trail Stop — {sym} (SGX)</b>\n\n"
+                        f"🔔 <b>Trail Stop — {sym}</b> · 🇸🇬\n\n"
                         f"<code>"
                         f"Price    S${current:.3f}\n"
                         f"Trail    S${trail_stop:.3f}  (10% below peak)\n"
@@ -954,14 +960,14 @@ def _slippage_verdict(mean_slip: float, n: int) -> str:
 
 def _format_slippage_report(fills: list[dict]) -> str:
     if not fills:
-        return ("📐 <b>SGX Fill Slippage</b>\n\nNo fills recorded yet. When an SGX order "
+        return ("🇸🇬 <b>SGX Fill Slippage</b>\n\nNo fills recorded yet. When an SGX order "
                 "alert fires, place the paper trade in moomoo and reply:\n"
                 "<code>/fill D05 33.45 [qty]</code>")
     slips = [f["slippage_pct"] for f in fills]
     mean_slip = sum(slips) / len(slips)
     worst = max(slips)
     lines = [
-        "📐 <b>SGX Fill Slippage</b>  (adverse = positive)",
+        "🇸🇬 <b>SGX Fill Slippage</b>  (adverse = positive)",
         "",
         f"<code>Fills   {len(slips)}\n"
         f"Mean    {mean_slip:+.2f}%\n"
@@ -1071,7 +1077,7 @@ async def _record_sgx_fill(symbol: str, fill_price: float, fill_qty: float | Non
     slips = [f["slippage_pct"] for f in fills]
     mean_slip = sum(slips) / len(slips)
     telegram_bot.send(
-        f"✅ <b>Fill recorded — {side} {symbol}</b>\n\n"
+        f"✅ <b>Fill Logged — {side} {symbol}</b> · 🇸🇬\n\n"
         f"<code>"
         f"Signal  S${signal_price:.3f}\n"
         f"Fill    S${fill_price:.3f}\n"
@@ -1182,9 +1188,9 @@ async def handle_telegram_command(text: str):
         mult = regime.get("new_position_size_multiplier", 1.0)
         size_note = "  ⚠️ Use half size" if mult < 1 else ""
         telegram_bot.send(
-            f"{'📈' if bullish else '📉'} <b>Market Status</b>\n\n"
+            f"📊 <b>Market Status</b>\n\n"
             f"<code>"
-            f"Regime   {'BULLISH' if bullish else 'BEARISH'}{size_note}\n"
+            f"Regime   {'BULLISH ▲' if bullish else 'BEARISH ▼'}{size_note}\n"
             f"VIX      {vix:.1f}\n"
             f"SGD/USD  {sgd:.4f}"
             f"</code>"
@@ -1573,21 +1579,31 @@ async def send_sgx_morning_briefing():
         price = d["analysis"]["price"]
         reason = signal["reasons"][0] if signal["reasons"] else signal["suggested_action"]
         if action in ACTIONABLE:
-            actionable.append(f"  {action} {symbol} @ S${price:.3f} — {reason}")
+            actionable.append(f"• <b>{action} {symbol}</b> @ S${price:.3f} — {reason}")
         elif action == "WATCH":
-            watching.append(f"  {symbol} @ S${price:.3f} — {reason}")
+            watching.append(f"• {symbol} @ S${price:.3f} — {reason}")
 
-    lines = [f"🇸🇬 SGX Morning — {now_sgt.strftime('%a %d %b')}, opens 9:00 AM"]
-    lines.append(f"Regime: {regime.get('regime','—')} ({regime.get('basis','STI')}) | VIX {regime.get('vix','—')}")
-    lines.append("")
+    regime_str = regime.get("regime", "—")
+    arrow = " ▲" if regime_str == "BULLISH" else (" ▼" if regime_str == "BEARISH" else "")
+    vix = regime.get("vix")
+    market_block = f"Regime   {regime_str}{arrow} ({regime.get('basis', 'STI')})"
+    if isinstance(vix, (int, float)):
+        market_block += f"\nVIX      {vix:.1f}"
+    lines = [
+        f"🇸🇬 <b>SGX Pre-Open — {now_sgt.strftime('%a %d %b')}</b>",
+        "Opens <code>9:00 AM SGT</code>",
+        "",
+        "📊 <b>Market</b>",
+        f"<code>{market_block}</code>",
+        "",
+        "⚡ <b>Act at open (9:00 AM SGT)</b>",
+    ]
     if actionable:
-        lines.append("Actionable:")
         lines.extend(actionable)
     else:
-        lines.append("No actionable signals.")
+        lines.append("• Nothing to do — hold positions as planned")
     if watching:
-        lines.append("")
-        lines.append("Watching:")
+        lines += ["", "👀 <b>Watch closely</b>"]
         lines.extend(watching)
 
     telegram_bot.send("\n".join(lines))
@@ -1640,9 +1656,11 @@ async def _send_daily_summary(market: str):
         regime = await loop.run_in_executor(None, get_sgx_regime, regime)
 
     flag = "🇸🇬" if market == "SGX" else "🇺🇸"
-    label = "SGX Day Summary" if market == "SGX" else "US Session Summary (overnight)"
+    label = "SGX Day Summary" if market == "SGX" else "US Day Summary (overnight)"
+    regime_str = regime.get("regime", "—")
+    arrow = " ▲" if regime_str == "BULLISH" else (" ▼" if regime_str == "BEARISH" else "")
     lines = [f"{flag} <b>{label} — {datetime.now(SGT).strftime('%a %d %b')}</b>",
-             f"Regime: {regime.get('regime','—')} ({regime.get('basis', 'SPY')})", ""]
+             f"<code>Regime   {regime_str}{arrow} ({regime.get('basis', 'SPY')})</code>", ""]
 
     if events:
         lines.append("Signals (✓ sent · ⏸ queued):")
@@ -2431,8 +2449,9 @@ async def add_trade(trade: TradeIn):
     )
     db.add_price_alert(symbol, round(stop, 4), "below", source="trade")
     db.add_price_alert(symbol, round(target, 4), "above", source="trade")
+    market = "SGX" if symbol in SGX_WATCHLIST else ("CRYPTO" if "-USD" in symbol else "US")
     telegram_bot.send(telegram_bot.format_trade_entry(
-        symbol, trade.shares, entry, trade.entry_date, analysis
+        symbol, trade.shares, entry, trade.entry_date, analysis, market=market
     ))
     return {"status": "ok"}
 
@@ -2453,8 +2472,9 @@ async def close_trade(trade_id: int, close: TradeClose):
     loop = asyncio.get_event_loop()
     regime = await loop.run_in_executor(None, get_market_regime)
     sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+    market = "SGX" if symbol in SGX_WATCHLIST else ("CRYPTO" if "-USD" in symbol else "US")
     telegram_bot.send(telegram_bot.format_trade_exit(
-        symbol, shares, entry_price, close.exit_price, sgd_to_usd
+        symbol, shares, entry_price, close.exit_price, sgd_to_usd, market=market
     ))
     return {"status": "ok"}
 

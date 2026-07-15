@@ -64,6 +64,35 @@ def _trend(above_200: bool | None) -> str:
     return "▲ uptrend" if above_200 else "▼ broken"
 
 
+# ── Message style system (agreed 2026-07-15) ─────────────────────────────────
+# Single-event headers: "{action icon} <b>{Event} — {subject}</b> · {market icon}"
+# (action-first: the color dot carries urgency, the flag closes the line).
+# Market-scoped digests lead with the flag instead: "🇸🇬 <b>SGX Pre-Open — …</b>".
+# Data lives in ONE <code> block per message with 8-char padded labels; SGX money
+# is S$ with 3dp, US/crypto $ with 2dp; next-step icons are semantic:
+# ⚡ act now · 📋 instructions · ⚠️ caution · 📝 log/record.
+
+MARKET_ICON = {"US": "🇺🇸", "SGX": "🇸🇬", "CRYPTO": "🪙"}
+
+
+def market_of(symbol: str) -> str:
+    """Market from a yfinance-style symbol (bare SGX codes must be tagged by the caller)."""
+    if symbol.endswith("-USD"):
+        return "CRYPTO"
+    if symbol.endswith(".SI"):
+        return "SGX"
+    return "US"
+
+
+def money_for(market: str):
+    cur = "S$" if market == "SGX" else "$"
+    dp = 3 if market == "SGX" else 2
+
+    def money(v: float) -> str:
+        return f"{cur}{v:,.{dp}f}"
+    return money
+
+
 def format_signal(
     symbol: str,
     signal: dict,
@@ -83,25 +112,24 @@ def format_signal(
     stop = stop if stop is not None else analysis.get("stop_loss", 0)
     target = target if target is not None else analysis.get("profit_target", 0)
     reason = signal["reasons"][0] if signal["reasons"] else ""
-    is_crypto = position_size is not None and position_size.get("risk_sgd") is None
+    # Legacy fallback for callers that don't tag the market: old crypto sizing
+    # had no risk_sgd. New crypto sizing sets it, so the heuristic alone is
+    # unreliable — crypto_watcher passes market="CRYPTO" explicitly.
+    is_crypto = market == "CRYPTO" or (position_size is not None and position_size.get("risk_sgd") is None)
     trade_type = signal.get("trade_type", "")
-    type_tag = f" · {trade_type}" if trade_type else ""
 
-    cur = "S$" if market == "SGX" else "$"
-    dp = 3 if market == "SGX" else 2
-
-    def money(v: float) -> str:
-        return f"{cur}{v:,.{dp}f}"
+    money = money_for(market)
+    flag = MARKET_ICON.get(market, "")
 
     HEADER = {
-        "BUY":       f"🟢 <b>BUY — {symbol}{type_tag}</b>",
-        "SELL":      f"🔴 <b>SELL — {symbol}</b>",
-        "SELL_HALF": f"🟠 <b>SELL HALF — {symbol}</b>",
-        "REVIEW":    f"🟡 <b>REVIEW — {symbol}</b>",
+        "BUY":       f"🟢 <b>BUY — {symbol}</b> · {flag}",
+        "SELL":      f"🔴 <b>SELL — {symbol}</b> · {flag}",
+        "SELL_HALF": f"🟠 <b>SELL HALF — {symbol}</b> · {flag}",
+        "REVIEW":    f"🟡 <b>REVIEW — {symbol}</b> · {flag}",
     }
 
-    lines = [HEADER.get(action, f"⚪ <b>{action} — {symbol}</b>"), ""]
-    lines.append(reason)
+    lines = [HEADER.get(action, f"⚪ <b>{action} — {symbol}</b> · {flag}"), ""]
+    lines.append(f"{trade_type} · {reason}" if trade_type else reason)
 
     if action == "BUY":
         fund_line = ""
@@ -199,18 +227,20 @@ def format_trade_entry(
     entry_price: float,
     entry_date: str,
     analysis: dict | None = None,
+    market: str = "US",
 ) -> str:
     stop = analysis.get("stop_loss", 0) if analysis else 0
     target = analysis.get("profit_target", 0) if analysis else 0
+    money = money_for(market)
 
-    data = f"Price    ${entry_price:.2f}\nShares   {shares:.3f}\nDate     {entry_date}"
+    data = f"Price    {money(entry_price)}\nShares   {shares:.3f}\nDate     {entry_date}"
     if stop and target:
         data += (
-            f"\n\nStop     ${stop:.2f}  ({_pct(stop, entry_price)})\n"
-            f"Target   ${target:.2f}  ({_pct(target, entry_price)})"
+            f"\n\nStop     {money(stop)}  ({_pct(stop, entry_price)})\n"
+            f"Target   {money(target)}  ({_pct(target, entry_price)})"
         )
 
-    return f"📥 <b>TRADE LOGGED — {symbol}</b>\n\n<code>{data}</code>"
+    return f"📥 <b>Trade Logged — {symbol}</b> · {MARKET_ICON.get(market, '')}\n\n<code>{data}</code>"
 
 
 def format_trade_exit(
@@ -219,19 +249,28 @@ def format_trade_exit(
     entry_price: float,
     exit_price: float,
     sgd_to_usd: float = 0.74,
+    market: str = "US",
 ) -> str:
-    pnl_usd = (exit_price - entry_price) * shares
+    pnl = (exit_price - entry_price) * shares
     pnl_pct = ((exit_price - entry_price) / entry_price) * 100
-    pnl_sgd = pnl_usd / sgd_to_usd
-    sign = "+" if pnl_usd >= 0 else ""
-    label = "✅ WIN" if pnl_usd >= 0 else "❌ LOSS"
+    sign = "+" if pnl >= 0 else "-"
+    label = "✅ Win" if pnl >= 0 else "❌ Loss"
+    money = money_for(market)
+
+    # Sign leads the currency ("-S$165", never "S$-165")
+    if market == "SGX":
+        pnl_line = f"P&L      {sign}S${abs(pnl):,.2f}  ({sign}{abs(pnl_pct):.1f}%)"
+    else:
+        pnl_line = (f"P&L      {sign}${abs(pnl):,.2f}  ({sign}{abs(pnl_pct):.1f}%)"
+                    f"  ·  {sign}S${abs(pnl / sgd_to_usd):,.0f}")
 
     return (
-        f"📤 <b>CLOSED — {symbol}  {label}</b>\n\n"
+        f"📤 <b>Closed — {symbol}</b> · {MARKET_ICON.get(market, '')}\n\n"
+        f"{label}\n"
         "<code>"
-        f"Entry    ${entry_price:.2f}  →  Exit ${exit_price:.2f}\n"
+        f"Entry    {money(entry_price)}  →  Exit {money(exit_price)}\n"
         f"Shares   {shares:.3f}\n"
-        f"P&L      {sign}${pnl_usd:.2f}  ({sign}{pnl_pct:.1f}%)  ·  S${pnl_sgd:+.0f}"
+        f"{pnl_line}"
         "</code>"
     )
 
@@ -389,8 +428,8 @@ def format_crypto_digest(rows: list[dict], sgd_to_usd: float = 0.74) -> str:
             "",
             f"💡 <b>Buy {r['symbol']}</b> — {reason}",
             "<code>"
-            f"Entry  ${price:.2f}  Stop ${stop:.2f} ({_pct(stop, price)})  Target ${target:.2f} ({_pct(target, price)})"
-            + (f"\nSize   {ps['shares']:.4f}  (S${ps['position_value_sgd']:.0f} ≈ ${ps['position_value_usd']:.0f})" if ps else "")
+            f"Entry  ${price:,.2f}  Stop ${stop:,.2f} ({_pct(stop, price)})  Target ${target:,.2f} ({_pct(target, price)})"
+            + (f"\nSize   {ps['shares']:.4f}  (S${ps['position_value_sgd']:,.0f} ≈ ${ps['position_value_usd']:,.0f})" if ps else "")
             + "</code>",
         ]
 
@@ -408,8 +447,8 @@ def format_scan_results(results: dict) -> str:
     vix        = regime.get("vix", 0)
 
     lines = [
-        f"🔍 <b>Market Scan — {total} stocks</b>",
-        f"<code>Regime {'BULLISH ▲' if bullish else 'BEARISH ▼'}   VIX {vix:.1f}</code>",
+        f"🇺🇸 <b>US Market Scan — {total} stocks</b>",
+        f"<code>Regime   {'BULLISH ▲' if bullish else 'BEARISH ▼'}\nVIX      {vix:.1f}</code>",
         "",
     ]
 
@@ -525,15 +564,15 @@ def format_morning_briefing(
         for s in watch_signals:
             lines.append(f"• {s['symbol']} — {s['reason']}")
 
-    lines += ["", "<i>Doesn't account for US public holidays. Verify before trading.</i>"]
+    lines += ["", "<i>Doesn't account for US public holidays · verify before trading</i>"]
     return "\n".join(lines)
 
 
 def format_startup(watchlist: list[str]) -> str:
     tickers = "  ".join(watchlist) if watchlist else "none"
     return (
-        "📊 <b>Trading Dashboard online</b>\n\n"
-        f"<code>Watching   {tickers}</code>\n\n"
+        "📊 <b>Trading Dashboard Online</b>\n\n"
+        f"<code>Watching {tickers}</code>\n\n"
         "Signals will be sent as they trigger.\n"
         "Type /help for available commands."
     )
