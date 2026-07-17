@@ -70,6 +70,19 @@ def _fetch_history(symbol: str, period: str = "1y") -> pd.DataFrame:
     return hist
 
 
+def get_return_since(symbol: str, start_date: str) -> dict | None:
+    """Return from the first close on/after start_date (YYYY-MM-DD) to the latest close."""
+    hist = _fetch_history(symbol)
+    closes = hist["Close"].dropna() if not hist.empty else hist
+    if closes is None or len(closes) == 0:
+        return None
+    sel = closes[closes.index.strftime("%Y-%m-%d") >= start_date]
+    if len(sel) == 0:
+        return None
+    start, now = float(sel.iloc[0]), float(closes.iloc[-1])
+    return {"start": start, "now": now, "pct": (now / start - 1) * 100}
+
+
 def get_market_regime() -> dict:
     spy_hist = _fetch_history("SPY")
     vix_hist = _fetch_history("^VIX", period="5d")

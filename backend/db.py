@@ -435,6 +435,27 @@ def get_recorded_fills() -> list[dict]:
     )
 
 
+def get_last_recorded_fill() -> dict | None:
+    """Most recently reported fill — what /undo reverts."""
+    return fetchone(
+        "SELECT * FROM sgx_fills WHERE fill_price IS NOT NULL "
+        "ORDER BY fill_ts DESC, id DESC LIMIT 1"
+    )
+
+
+def clear_fill(fill_id: int) -> None:
+    """Reset a fill back to pending so it can be re-reported with /fill."""
+    mutate(
+        "UPDATE sgx_fills SET fill_price=NULL, fill_qty=NULL, slippage_pct=NULL, fill_ts=NULL WHERE id=?",
+        (fill_id,),
+    )
+
+
+def get_all_sgx_signals() -> list[dict]:
+    """Every SGX order alert, filled or not — the /discipline dataset."""
+    return fetch("SELECT * FROM sgx_fills ORDER BY id")
+
+
 # ── News digest ───────────────────────────────────────────────────────────────
 
 def has_news_digest(symbol: str, move_date: str) -> bool:

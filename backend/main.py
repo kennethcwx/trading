@@ -21,7 +21,7 @@ import futu_broker
 import db
 import telegram_bot
 import news
-from analysis import get_market_regime, get_crypto_regime, get_sgx_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, invalidate_cache
+from analysis import get_market_regime, get_crypto_regime, get_sgx_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, get_return_since, invalidate_cache
 from signals import generate_signal, calculate_position_size
 from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO
 
@@ -96,6 +96,13 @@ def _remember_signal(store: dict[str, str], strategy: str, symbol: str, action: 
 
 ET  = ZoneInfo("America/New_York")
 SGT = ZoneInfo("Asia/Singapore")
+
+# Shadow-run window agreed 2026-07-12: strategy D vs SPY with pre-committed criteria
+VALIDATION_START = "2026-07-13"
+
+# Process start — shown in /health so "heartbeat missing" is readable as
+# "restarted recently" vs "watcher actually dead" (heartbeats are in-memory)
+_START_TS = datetime.now(ZoneInfo("Asia/Singapore"))
 
 
 async def _fetch_batch(symbols: list[str], max_concurrent: int = 15) -> list[dict]:
@@ -1089,6 +1096,271 @@ async def _record_sgx_fill(symbol: str, fill_price: float, fill_qty: float | Non
     )
 
 
+def _fmt_age(td: timedelta) -> str:
+    mins = int(td.total_seconds() // 60)
+    if mins < 60:
+        return f"{mins}m"
+    if mins < 60 * 24:
+        return f"{mins // 60}h {mins % 60:02d}m"
+    return f"{mins // (60 * 24)}d {(mins % (60 * 24)) // 60}h"
+
+
+def _trade_group(t: dict) -> str:
+    return "SGX" if (t.get("strategy") == "SGX" or str(t["symbol"]).endswith(".SI")) else "US"
+
+
+async def _portfolio_snapshot() -> dict:
+    """Open positions with live prices plus realized/unrealized P&L, split by
+    currency (US trades are in USD, SGX trades in SGD) so totals never mix."""
+    loop = asyncio.get_event_loop()
+    rows = [dict(r) for r in db.fetch("SELECT * FROM trades ORDER BY entry_date DESC")]
+    positions = []
+    realized = {"US": 0.0, "SGX": 0.0}
+    unrealized = {"US": 0.0, "SGX": 0.0}
+    for t in rows:
+        group = _trade_group(t)
+        if t["exit_price"] is not None:
+            realized[group] += (t["exit_price"] - t["entry_price"]) * t["shares"]
+            continue
+        yf_sym = t["symbol"] if str(t["symbol"]).endswith(".SI") or group == "US" else t["symbol"] + ".SI"
+        analysis = await loop.run_in_executor(None, get_ticker_analysis, yf_sym)
+        current = analysis["price"] if analysis else None
+        pnl_pct = None
+        if current:
+            unrealized[group] += (current - t["entry_price"]) * t["shares"]
+            pnl_pct = ((current - t["entry_price"]) / t["entry_price"]) * 100
+        positions.append({**t, "group": group, "current": current, "pnl_pct": pnl_pct})
+    return {"positions": positions, "realized": realized, "unrealized": unrealized,
+            "n_closed": sum(1 for t in rows if t["exit_price"] is not None)}
+
+
+async def _send_portfolio():
+    snap = await _portfolio_snapshot()
+    positions = snap["positions"]
+    if not positions and not snap["n_closed"]:
+        telegram_bot.send("💼 <b>Portfolio</b>\n\nNo trades logged yet — the first SGX BUY /fill will open one.")
+        return
+
+    lines = ["💼 <b>Portfolio</b>", ""]
+    if positions:
+        lines.append(f"📋 <b>Open ({len(positions)})</b>")
+        pos_rows = []
+        for t in positions:
+            money = telegram_bot.money_for(t["group"])
+            flag = telegram_bot.MARKET_ICON.get(t["group"], "")
+            if t["current"] is not None:
+                sign = "+" if t["pnl_pct"] >= 0 else ""
+                pos_rows.append(f"{t['symbol']:<6} {t['shares']:g}sh  in {money(t['entry_price'])}"
+                                f"  now {money(t['current'])}  {sign}{t['pnl_pct']:.1f}% {flag}")
+            else:
+                pos_rows.append(f"{t['symbol']:<6} {t['shares']:g}sh  in {money(t['entry_price'])}  (no live price) {flag}")
+        lines.append("<code>" + "\n".join(pos_rows) + "</code>")
+    else:
+        lines.append("📋 <b>Open</b>  none")
+
+    lines += ["", "💰 <b>P&L</b>"]
+    pnl_rows = []
+    for group, cur, dp in (("US", "$", 2), ("SGX", "S$", 3)):
+        r, u = snap["realized"][group], snap["unrealized"][group]
+        if r == 0 and u == 0 and not any(p["group"] == group for p in positions):
+            continue
+        for label, v in (("Realized", r), ("Unrealized", u), ("Total", r + u)):
+            sign = "+" if v >= 0 else "-"
+            pnl_rows.append(f"{group:<4} {label:<11}{sign}{cur}{abs(v):,.{dp}f}")
+    lines.append("<code>" + "\n".join(pnl_rows) + "</code>" if pnl_rows else "<code>Nothing realized yet</code>")
+    telegram_bot.send("\n".join(lines))
+
+
+async def _undo_last_fill():
+    """Revert the most recent /fill — clears the slippage record and unwinds the
+    trade bookkeeping it created, so the alert can be re-reported correctly."""
+    last = db.get_last_recorded_fill()
+    if not last:
+        telegram_bot.send("Nothing to undo — no fills recorded yet.")
+        return
+
+    symbol, side, fill_price = last["symbol"], last["side"], last["fill_price"]
+    yf_sym = symbol + ".SI"
+    today_str = datetime.now(SGT).strftime("%Y-%m-%d")
+    book_note = ""
+
+    if side == "BUY":
+        trade = db.fetchone(
+            "SELECT id FROM trades WHERE symbol=? AND exit_price IS NULL AND entry_price=? "
+            "ORDER BY id DESC LIMIT 1",
+            (symbol, fill_price),
+        )
+        if trade:
+            db.mutate("DELETE FROM trades WHERE id=?", (trade["id"],))
+            db.remove_trade_alerts(yf_sym)
+            book_note = "\n📋 Open trade row deleted, stop/target alerts removed."
+    elif side == "SELL":
+        db.mutate(
+            "UPDATE trades SET exit_price=NULL, exit_date=NULL WHERE symbol=? AND exit_price=?",
+            (symbol, fill_price),
+        )
+        reopened = db.fetchone(
+            "SELECT stop_loss, profit_target FROM trades WHERE symbol=? AND exit_price IS NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (symbol,),
+        )
+        if reopened:
+            if reopened.get("stop_loss"):
+                db.add_price_alert(yf_sym, reopened["stop_loss"], "below", source="trade")
+            if reopened.get("profit_target"):
+                db.add_price_alert(yf_sym, reopened["profit_target"], "above", source="trade")
+            book_note = "\n📋 Trade reopened, stop/target alerts restored."
+    elif side == "SELL_HALF":
+        half = db.fetchone(
+            "SELECT id, shares FROM trades WHERE symbol=? AND exit_price=? "
+            "AND signal_reason='SGX Manual-SELL_HALF (paper)' ORDER BY id DESC LIMIT 1",
+            (symbol, fill_price),
+        )
+        if half:
+            db.mutate("DELETE FROM trades WHERE id=?", (half["id"],))
+            db.mutate(
+                "UPDATE trades SET shares = shares + ?, half_sold = 0 WHERE symbol=? AND exit_price IS NULL",
+                (half["shares"], symbol),
+            )
+            book_note = ("\n📋 Half-sale row deleted, shares restored."
+                         "\n⚠️ Stop stayed at breakeven — re-check it if the original stop should apply.")
+
+    db.clear_fill(last["id"])
+    telegram_bot.send(
+        f"↩️ <b>Fill Undone — {side} {symbol}</b> · 🇸🇬\n\n"
+        f"<code>Was     S${fill_price:.3f}</code>\n\n"
+        f"The alert is pending again — re-report with 📝 /fill {symbol} &lt;price&gt; [qty]."
+        f"{book_note}"
+    )
+
+
+def _format_discipline() -> str:
+    rows = db.get_all_sgx_signals()
+    if not rows:
+        return ("📝 <b>Discipline — SGX Alerts</b> · 🇸🇬\n\n"
+                "No SGX order alerts yet. Every BUY/SELL alert lands here when it "
+                "fires — report your moomoo fills with /fill.")
+
+    now = datetime.now(SGT)
+    acted, missed, fresh = [], [], []
+    resp_hours = []
+    for r in rows:
+        if r.get("fill_ts"):
+            acted.append(r)
+            try:
+                dt = datetime.fromisoformat(r["fill_ts"]) - datetime.fromisoformat(r["signal_ts"])
+                resp_hours.append(dt.total_seconds() / 3600)
+            except (ValueError, TypeError):
+                pass
+        else:
+            try:
+                age = now - datetime.fromisoformat(r["signal_ts"])
+            except (ValueError, TypeError):
+                age = timedelta(days=99)
+            (fresh if age <= timedelta(days=1) else missed).append(r)
+
+    within_1d = sum(1 for h in resp_hours if h <= 24) + (len(acted) - len(resp_hours))
+    eligible = len(acted) + len(missed)  # alerts young enough to still act on don't count against
+    pct = within_1d / eligible * 100 if eligible else 100.0
+
+    lines = [
+        "📝 <b>Discipline — SGX Alerts</b> · 🇸🇬",
+        "",
+        "<code>"
+        f"Alerts    {len(rows)}\n"
+        f"Acted ≤1d {within_1d}/{eligible}  ({pct:.0f}%)"
+        + (f"\nMedian    {_median(resp_hours):.1f}h to /fill" if resp_hours else "")
+        + (f"\nPending   {len(fresh)}  (&lt;1d old)" if fresh else "")
+        + "</code>",
+        "",
+        ("✅ On track — criterion is ≥90% acted within a day"
+         if pct >= 90 else "⚠️ Below the pre-committed ≥90% criterion"),
+    ]
+    outstanding = missed + fresh
+    if outstanding:
+        lines += ["", "👀 <b>Awaiting /fill</b>"]
+        for r in outstanding[-5:]:
+            ts = (r.get("signal_ts") or "")[:16].replace("T", " ")
+            lines.append(f"• {r['side']} {r['symbol']} — {ts}")
+    return "\n".join(lines)
+
+
+async def _send_benchmark():
+    loop = asyncio.get_event_loop()
+    snap = await _portfolio_snapshot()
+    regime = await asyncio.wait_for(loop.run_in_executor(None, get_market_regime), timeout=20)
+    sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+    spy = await asyncio.wait_for(
+        loop.run_in_executor(None, get_return_since, "SPY", VALIDATION_START), timeout=20)
+
+    us_total = snap["realized"]["US"] + snap["unrealized"]["US"]
+    sgx_total = snap["realized"]["SGX"] + snap["unrealized"]["SGX"]
+    total_sgd = us_total / sgd_to_usd + sgx_total
+    strat_pct = total_sgd / PORTFOLIO_SIZE_SGD * 100
+    days = (datetime.now(SGT).date() - datetime.strptime(VALIDATION_START, "%Y-%m-%d").date()).days
+
+    s_sign = "+" if total_sgd >= 0 else "-"
+    lines = [
+        "📊 <b>Benchmark — Validation vs SPY</b>",
+        f"Since {VALIDATION_START} · day {days} of the 8–12 week shadow run",
+        "",
+        "<code>"
+        f"Strategy  {'+' if strat_pct >= 0 else ''}{strat_pct:.2f}%  ({s_sign}S${abs(total_sgd):,.0f} on S${PORTFOLIO_SIZE_SGD:,.0f})",
+    ]
+    if spy:
+        delta = strat_pct - spy["pct"]
+        lines += [
+            f"SPY       {'+' if spy['pct'] >= 0 else ''}{spy['pct']:.2f}%  (${spy['start']:,.2f} → ${spy['now']:,.2f})\n"
+            f"Δ         {'+' if delta >= 0 else ''}{delta:.2f}%"
+            "</code>",
+            "",
+            ("✅ Ahead of SPY" if delta >= 0 else "⚠️ Behind SPY") + " so far",
+        ]
+    else:
+        lines += ["SPY       data unavailable</code>"]
+    lines += ["", "<i>Criteria: beat SPY over the window · ≥90% alerts acted (/discipline)\n"
+                  "Corrected backtest to track: +8.0% CAGR / −7.6% maxDD</i>"]
+    telegram_bot.send("\n".join(lines))
+
+
+async def _send_health():
+    loop = asyncio.get_event_loop()
+    commit = os.getenv("RENDER_GIT_COMMIT", "")[:7] or "local"
+    now = datetime.now(SGT)
+    hb_rows = []
+    for name in ("us_scan", "us_entry_scan", "sgx_scan", "sgx_entry_scan", "crypto_scan", "news_scan"):
+        ts = _heartbeats.get(name)
+        if ts:
+            try:
+                hb_rows.append(f"{name:<15}{_fmt_age(now - datetime.fromisoformat(ts))} ago")
+            except ValueError:
+                hb_rows.append(f"{name:<15}{ts}")
+        else:
+            hb_rows.append(f"{name:<15}—")
+    msg = (
+        "🩺 <b>Backend Health</b>\n\n"
+        f"<code>Commit   {commit}\nUp       {_fmt_age(now - _START_TS)}</code>\n\n"
+        "<b>Watcher heartbeats</b>\n"
+        "<code>" + "\n".join(hb_rows) + "</code>\n"
+        "<i>— means no pass since the last restart</i>"
+    )
+    try:
+        regime = await asyncio.wait_for(loop.run_in_executor(None, get_market_regime), timeout=15)
+        bullish = regime.get("regime_ok", False)
+        size_note = "  ⚠️ half size" if regime.get("new_position_size_multiplier", 1.0) < 1 else ""
+        msg += (
+            "\n\n<code>"
+            f"Regime   {'BULLISH ▲' if bullish else 'BEARISH ▼'}{size_note}\n"
+            f"VIX      {regime.get('vix', 0):.1f}\n"
+            f"SGD/USD  {regime.get('sgd_to_usd', 0.74):.4f}"
+            "</code>"
+        )
+    except Exception as e:
+        logging.warning(f"/health regime fetch skipped: {e}")
+        msg += "\n\n<i>Regime fetch timed out — watchers above are the health signal</i>"
+    telegram_bot.send(msg)
+
+
 async def handle_telegram_command(text: str):
     parts = text.strip().split()
     cmd = parts[0].lower().split("@")[0]
@@ -1097,21 +1369,21 @@ async def handle_telegram_command(text: str):
     if cmd == "/help":
         telegram_bot.send(
             "<b>Available commands</b>\n\n"
-            "/scan — scan 70 stocks for BUY setups + wheel opportunities\n"
+            "<b>Validation loop</b>\n"
+            "/portfolio — open positions + realized/unrealized P&L\n"
+            "/fill D05 33.45 — report your moomoo fill for the last SGX alert\n"
+            "/undo — revert the last /fill (wrong price/qty)\n"
+            "/slippage — SGX signal-vs-fill slippage report\n"
+            "/discipline — alerts acted on vs missed\n"
+            "/benchmark — validation P&L vs SPY since 2026-07-13\n\n"
+            "<b>Signals</b>\n"
             "/crypto — current signal for BTC, ETH, SOL\n"
             "/signal AAPL — current signal for any ticker\n"
-            "/share AAPL — shareable summary to send to friends\n"
-            "/positions — your open trades with live P&L\n"
-            "/briefing — send the US pre-open briefing now\n"
-            "/fill D05 33.45 — report your moomoo fill for the last SGX alert\n"
-            "/slippage — SGX signal-vs-fill slippage report\n"
-            "/alert AAPL 200 — notify when price crosses a level\n"
-            "/alerts — list active price alerts\n"
-            "/removealert 1 — remove alert by ID\n"
-            "/watchlist — show your watchlist\n"
-            "/add AAPL — add ticker to watchlist\n"
-            "/remove AAPL — remove ticker from watchlist\n"
-            "/status — market regime overview"
+            "/scan — scan 70 stocks for BUY setups + wheel opportunities\n"
+            "/briefing — send the US pre-open briefing now\n\n"
+            "<b>System</b>\n"
+            "/health — backend commit, watcher heartbeats, market regime\n"
+            "/watchlist · /add AAPL · /remove AAPL"
         )
 
     elif cmd == "/crypto":
@@ -1180,22 +1452,6 @@ async def handle_telegram_command(text: str):
             logging.warning(f"/scan error: {e}")
             telegram_bot.send(f"❌ Scan failed.\n<code>{e}</code>")
 
-    elif cmd == "/status":
-        regime = await loop.run_in_executor(None, get_market_regime)
-        bullish = regime.get("regime_ok", False)
-        vix = regime.get("vix", 0)
-        sgd = regime.get("sgd_to_usd", 0.74)
-        mult = regime.get("new_position_size_multiplier", 1.0)
-        size_note = "  ⚠️ Use half size" if mult < 1 else ""
-        telegram_bot.send(
-            f"📊 <b>Market Status</b>\n\n"
-            f"<code>"
-            f"Regime   {'BULLISH ▲' if bullish else 'BEARISH ▼'}{size_note}\n"
-            f"VIX      {vix:.1f}\n"
-            f"SGD/USD  {sgd:.4f}"
-            f"</code>"
-        )
-
     elif cmd == "/watchlist":
         symbols = db.get_watchlist()
         tickers = "  ".join(symbols) if symbols else "empty"
@@ -1210,6 +1466,12 @@ async def handle_telegram_command(text: str):
         if symbol in watchlist:
             telegram_bot.send(f"{symbol} is already in your watchlist")
         else:
+            # Validate before saving — a bad ticker in the watchlist trips every
+            # subsequent scan, not just this command
+            analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
+            if not analysis:
+                telegram_bot.send(f"❌ Couldn't fetch data for {symbol} — not added. Check the ticker (SGX needs .SI).")
+                return
             db.set_watchlist(watchlist + [symbol])
             invalidate_cache()
             telegram_bot.send(f"✅ Added {symbol} — watchlist now: {', '.join(watchlist + [symbol])}")
@@ -1267,144 +1529,38 @@ async def handle_telegram_command(text: str):
             logging.warning(f"/signal error: {e}")
             telegram_bot.send(f"❌ Signal fetch failed: {e}")
 
-    elif cmd == "/pnl":
-        rows = db.fetch("SELECT * FROM trades ORDER BY entry_date DESC")
-
-        if not rows:
-            telegram_bot.send("No trades logged yet.")
-            return
-
-        realized_usd = 0.0
-        unrealized_usd = 0.0
-        regime = await loop.run_in_executor(None, get_market_regime)
-        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
-
-        for row in rows:
-            t = dict(row)
-            if t["exit_price"] is not None:
-                realized_usd += (t["exit_price"] - t["entry_price"]) * t["shares"]
-            else:
-                analysis = await loop.run_in_executor(None, get_ticker_analysis, t["symbol"])
-                if analysis:
-                    unrealized_usd += (analysis["price"] - t["entry_price"]) * t["shares"]
-
-        total_usd = realized_usd + unrealized_usd
-        r_sign = "+" if realized_usd >= 0 else ""
-        u_sign = "+" if unrealized_usd >= 0 else ""
-        t_sign = "+" if total_usd >= 0 else ""
-
-        telegram_bot.send(
-            "💰 <b>P&L Summary</b>\n\n"
-            "<code>"
-            f"Realized    {r_sign}${realized_usd:.2f}  ({r_sign}S${realized_usd/sgd_to_usd:.0f})\n"
-            f"Unrealized  {u_sign}${unrealized_usd:.2f}  ({u_sign}S${unrealized_usd/sgd_to_usd:.0f})\n"
-            f"─────────────────────────\n"
-            f"Total       {t_sign}${total_usd:.2f}  ({t_sign}S${total_usd/sgd_to_usd:.0f})"
-            "</code>"
-        )
-
-    elif cmd == "/alert":
-        if len(parts) < 3:
-            telegram_bot.send("Usage: /alert AAPL 200.50")
-            return
-        symbol = parts[1].upper()
+    elif cmd == "/portfolio":
+        telegram_bot.send("⏳ Fetching portfolio…")
         try:
-            target = float(parts[2])
-        except ValueError:
-            telegram_bot.send("Usage: /alert AAPL 200.50")
-            return
-        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
-        if not analysis:
-            telegram_bot.send(f"❌ Could not fetch data for {symbol}")
-            return
-        current = analysis["price"]
-        direction = "above" if current < target else "below"
-        alert_id = db.add_price_alert(symbol, target, direction)
-        arrow = "↑" if direction == "above" else "↓"
-        telegram_bot.send(
-            f"🔔 Alert #{alert_id} set — <b>{symbol}</b>\n\n"
-            f"<code>"
-            f"Target   ${target:.2f}  {arrow}\n"
-            f"Current  ${current:.2f}"
-            f"</code>\n\n"
-            f"You'll be notified when the price {'rises above' if direction == 'above' else 'falls below'} ${target:.2f}."
-        )
+            await _send_portfolio()
+        except Exception as e:
+            logging.warning(f"/portfolio error: {e}")
+            telegram_bot.send(f"❌ Portfolio fetch failed.\n<code>{e}</code>")
 
-    elif cmd == "/alerts":
-        alerts = db.get_price_alerts()
-        if not alerts:
-            telegram_bot.send("No active price alerts. Use /alert AAPL 200 to set one.")
-            return
-        lines = ["🔔 <b>Active Alerts</b>", ""]
-        for a in alerts:
-            arrow = "↑" if a["direction"] == "above" else "↓"
-            lines.append(f"<code>#{a['id']}  {a['symbol']:<6}  {arrow}  ${a['target']:.2f}</code>")
-        lines.append("\nUse /removealert &lt;id&gt; to cancel one.")
-        telegram_bot.send("\n".join(lines))
-
-    elif cmd == "/removealert":
-        if len(parts) < 2:
-            telegram_bot.send("Usage: /removealert 1  (use /alerts to see IDs)")
-            return
+    elif cmd == "/undo":
         try:
-            alert_id = int(parts[1])
-        except ValueError:
-            telegram_bot.send("Usage: /removealert 1")
-            return
-        if db.remove_price_alert(alert_id):
-            telegram_bot.send(f"✅ Alert #{alert_id} removed.")
-        else:
-            telegram_bot.send(f"Alert #{alert_id} not found. Use /alerts to see active ones.")
+            await _undo_last_fill()
+        except Exception as e:
+            logging.warning(f"/undo error: {e}")
+            telegram_bot.send(f"❌ Undo failed.\n<code>{e}</code>")
 
-    elif cmd == "/share":
-        if len(parts) < 2:
-            telegram_bot.send("Usage: /share AAPL")
-            return
-        symbol = parts[1].upper()
-        telegram_bot.send(f"⏳ Generating summary for {symbol}…")
-        regime = await loop.run_in_executor(None, get_market_regime)
-        analysis = await loop.run_in_executor(None, get_ticker_analysis, symbol)
-        if not analysis:
-            telegram_bot.send(f"❌ Could not fetch data for {symbol} — check the ticker")
-            return
-        fundamentals = await loop.run_in_executor(None, get_fundamentals, symbol)
-        rel_strength = await loop.run_in_executor(None, get_relative_strength, symbol)
-        signal = generate_signal(analysis, None, regime, fundamentals, rel_strength)
-        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
-        size_mult = regime.get("new_position_size_multiplier", 1.0)
-        pos_size = None
-        if signal["action"] == "BUY":
-            pos_size = calculate_position_size(
-                PORTFOLIO_SIZE_SGD, analysis["price"], analysis["stop_loss"], sgd_to_usd, size_mult,
-            )
-        card = telegram_bot.format_share_card(symbol, signal, analysis, pos_size, fundamentals)
-        if card:
-            telegram_bot.send(card)
-        else:
-            telegram_bot.send(f"{symbol} has no actionable signal right now — signal is {signal['action']}")
+    elif cmd == "/discipline":
+        try:
+            telegram_bot.send(_format_discipline())
+        except Exception as e:
+            logging.warning(f"/discipline error: {e}")
+            telegram_bot.send(f"❌ Discipline report failed.\n<code>{e}</code>")
 
-    elif cmd == "/positions":
-        rows = db.fetch("SELECT * FROM trades WHERE exit_price IS NULL ORDER BY entry_date DESC")
+    elif cmd == "/benchmark":
+        telegram_bot.send("⏳ Computing benchmark…")
+        try:
+            await _send_benchmark()
+        except Exception as e:
+            logging.warning(f"/benchmark error: {e}")
+            telegram_bot.send(f"❌ Benchmark failed.\n<code>{e}</code>")
 
-        if not rows:
-            telegram_bot.send("📋 <b>Open Positions</b>\n\nNo open positions.")
-            return
-
-        lines = [f"📋 <b>Open Positions ({len(rows)})</b>", ""]
-        for row in rows:
-            t = dict(row)
-            analysis = await loop.run_in_executor(None, get_ticker_analysis, t["symbol"])
-            current = analysis["price"] if analysis else None
-            if current:
-                pnl_pct = ((current - t["entry_price"]) / t["entry_price"]) * 100
-                sign = "+" if pnl_pct >= 0 else ""
-                lines.append(
-                    f"<code>{t['symbol']:<6}  {t['shares']:.2f}sh"
-                    f"  in ${t['entry_price']:.2f}  now ${current:.2f}  {sign}{pnl_pct:.1f}%</code>"
-                )
-            else:
-                lines.append(f"<code>{t['symbol']:<6}  {t['shares']:.2f}sh  in ${t['entry_price']:.2f}</code>")
-        telegram_bot.send("\n".join(lines))
+    elif cmd == "/health":
+        await _send_health()
 
     else:
         telegram_bot.send("Unknown command. Type /help to see what's available.")

@@ -275,105 +275,6 @@ def format_trade_exit(
     )
 
 
-def _options_section(action: str, price: float, stop: float, target: float) -> str:
-    if action == "BUY":
-        call_strike = round(price * 1.05 / 0.5) * 0.5   # ~5% OTM call
-        put_strike  = round(stop / 0.5) * 0.5            # put at stop level
-        return (
-            "\n🎯 <b>Options plays</b> (30–45 DTE, verify IVR &gt; 30 first)\n"
-            "<code>"
-            f"Long call   ${call_strike:.2f} strike  (~5% OTM)\n"
-            f"            Bullish leverage, defined risk\n\n"
-            f"Sell put    ${put_strike:.2f} strike  (at stop level)\n"
-            f"            Get paid to wait for a cheaper entry"
-            "</code>"
-        )
-    elif action == "SELL_HALF":
-        call_strike = round(target / 0.5) * 0.5          # call at target — exit via premium
-        return (
-            "\n🎯 <b>Options plays</b> (30–45 DTE, verify IVR &gt; 30 first)\n"
-            "<code>"
-            f"Sell call   ${call_strike:.2f} strike  (at target)\n"
-            f"            Harvest premium while stock fades"
-            "</code>"
-        )
-    elif action == "SELL":
-        put_strike = round(price * 0.95 / 0.5) * 0.5    # ~5% OTM put
-        return (
-            "\n🎯 <b>Options plays</b> (30–45 DTE, verify IVR &gt; 30 first)\n"
-            "<code>"
-            f"Buy put     ${put_strike:.2f} strike  (~5% OTM)\n"
-            f"            Hedge or short with defined risk"
-            "</code>"
-        )
-    return ""
-
-
-def format_share_card(
-    symbol: str,
-    signal: dict,
-    analysis: dict,
-    position_size: dict | None,
-    fundamentals: dict | None = None,
-) -> str:
-    action = signal["action"]
-    price = analysis.get("price", 0)
-    stop = analysis.get("stop_loss", 0)
-    target = analysis.get("profit_target", 0)
-
-    if action == "BUY":
-        rr = round((target - price) / (price - stop), 1) if (price - stop) > 0 else 0
-        fund_line = ""
-        if fundamentals and not fundamentals.get("is_etf"):
-            grade = fundamentals.get("grade", "?")
-            good = fundamentals.get("reasons_good", [])
-            fund_line = f"\n📊 Company health: Grade {grade}"
-            if good:
-                fund_line += f" — {good[0].lower()}"
-
-        size_line = ""
-        if position_size:
-            size_line = f"\n💵 Position size: {position_size['shares']:.2f} shares (~S${position_size['position_value_sgd']:.0f})"
-
-        trade_type = signal.get("trade_type", "")
-        if "Momentum" in trade_type:
-            setup_desc = f"Trading at <b>${price:.2f}</b> — breaking out to a 20-day high with above-average volume, short-term trend confirmed."
-        else:
-            setup_desc = f"Trading at <b>${price:.2f}</b> — pulled back to an attractive entry zone while still in a long-term uptrend."
-
-        return (
-            f"📈 <b>Looking at {symbol}</b>\n\n"
-            f"{setup_desc}"
-            f"{fund_line}\n\n"
-            "<code>"
-            f"Entry       ${price:.2f}\n"
-            f"Stop loss   ${stop:.2f}  ({_pct(stop, price)})\n"
-            f"Target      ${target:.2f}  ({_pct(target, price)})\n"
-            f"Risk/Reward 1:{rr}"
-            "</code>"
-            f"{size_line}"
-            f"{_options_section(action, price, stop, target)}\n\n"
-            "<i>Not financial advice.</i>"
-        )
-
-    elif action in ("SELL", "SELL_HALF"):
-        verb = "Trimming" if action == "SELL_HALF" else "Exiting"
-        detail = (
-            "Taking partial profits — selling half and moving stop to breakeven."
-            if action == "SELL_HALF"
-            else "Closing the full position to protect capital."
-        )
-        return (
-            f"📉 <b>{symbol} — {verb} position</b>\n\n"
-            f"Current price: <b>${price:.2f}</b>\n\n"
-            f"{detail}"
-            f"{_options_section(action, price, stop, target)}\n\n"
-            "<i>Not financial advice.</i>"
-        )
-
-    return ""
-
-
 def format_news_alert(symbol: str, pct_change: float, price: float, headlines: list[dict], detected_at: str) -> str:
     icon = "🟢" if pct_change >= 0 else "🔴"
     sign = "+" if pct_change >= 0 else ""
@@ -582,23 +483,21 @@ def set_bot_commands() -> bool:
     if not TOKEN:
         return False
     commands = [
-        {"command": "scan",         "description": "Scan 70 stocks for BUY setups + wheel opportunities"},
-        {"command": "crypto",      "description": "Current signal for BTC, ETH, SOL"},
-        {"command": "briefing",    "description": "Send the US pre-open briefing now"},
-        {"command": "signal",      "description": "Signal for any ticker — /signal AAPL"},
-        {"command": "share",       "description": "Shareable summary for friends — /share AAPL"},
-        {"command": "positions",   "description": "Open trades with live P&L"},
-        {"command": "pnl",         "description": "Total realized + unrealized P&L"},
-        {"command": "fill",        "description": "Report moomoo fill for the last SGX alert — /fill D05 33.45"},
-        {"command": "slippage",    "description": "SGX signal-vs-fill slippage report"},
-        {"command": "alert",       "description": "Set price alert — /alert AAPL 200"},
-        {"command": "alerts",      "description": "List active price alerts"},
-        {"command": "removealert", "description": "Remove alert by ID — /removealert 1"},
-        {"command": "status",      "description": "Market regime, VIX, SGD/USD"},
-        {"command": "watchlist",   "description": "Show your watchlist"},
-        {"command": "add",         "description": "Add ticker — /add AAPL"},
-        {"command": "remove",      "description": "Remove ticker — /remove AAPL"},
-        {"command": "help",        "description": "Show all commands"},
+        {"command": "portfolio",  "description": "Open positions + realized/unrealized P&L"},
+        {"command": "fill",       "description": "Report moomoo fill for the last SGX alert — /fill D05 33.45"},
+        {"command": "undo",       "description": "Revert the last /fill (wrong price/qty)"},
+        {"command": "slippage",   "description": "SGX signal-vs-fill slippage report"},
+        {"command": "discipline", "description": "Alerts acted on vs missed (validation criterion)"},
+        {"command": "benchmark",  "description": "Validation P&L vs SPY since 2026-07-13"},
+        {"command": "health",     "description": "Backend commit, watcher heartbeats, market regime"},
+        {"command": "crypto",     "description": "Current signal for BTC, ETH, SOL"},
+        {"command": "signal",     "description": "Signal for any ticker — /signal AAPL"},
+        {"command": "scan",       "description": "Scan 70 stocks for BUY setups + wheel opportunities"},
+        {"command": "briefing",   "description": "Send the US pre-open briefing now"},
+        {"command": "watchlist",  "description": "Show your watchlist"},
+        {"command": "add",        "description": "Add ticker — /add AAPL"},
+        {"command": "remove",     "description": "Remove ticker — /remove AAPL"},
+        {"command": "help",       "description": "Show all commands"},
     ]
     try:
         data = json.dumps({"commands": commands}).encode()
