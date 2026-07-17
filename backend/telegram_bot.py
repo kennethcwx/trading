@@ -381,15 +381,10 @@ def format_scan_results(results: dict, tracked: list[str] | None = None) -> str:
     else:
         lines.append("🔎 <b>Candidates</b>  none — market may be extended")
 
-    # ── Close to entry ────────────────────────────────────────────────────────
-    if watches:
-        lines += ["", f"👀 <b>Close to Entry ({len(watches)})</b>"]
-        for w in watches:
-            rsi = w["analysis"].get("rsi")
-            suggested = w["signal"]["suggested_action"]
-            lines.append(f"• <b>{w['symbol']}</b>  RSI {rsi:.0f}  — {suggested}")
-
     # ── Wheel opportunities ───────────────────────────────────────────────────
+    # (Close-to-entry near-misses are collected in results but not shown —
+    # user dropped the section 2026-07-17: a near-miss that matures simply
+    # appears as a candidate on a later scan.)
     if wheels:
         lines += ["", f"🎡 <b>Wheel — Sell Put ({len(wheels)})</b>"]
         for w in wheels:
@@ -404,7 +399,7 @@ def format_scan_results(results: dict, tracked: list[str] | None = None) -> str:
             )
         lines += ["", "<i>Verify IVR &gt; 30 before any options trade.</i>"]
 
-    if not buys and not watches and not wheels:
+    if not buys and not wheels:
         lines += ["", "Nothing notable right now. Check back after the next move."]
 
     lines += ["", "<i>Not financial advice.</i>"]
