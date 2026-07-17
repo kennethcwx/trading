@@ -1379,7 +1379,7 @@ async def handle_telegram_command(text: str):
             "<b>Signals</b>\n"
             "/crypto — current signal for BTC, ETH, SOL\n"
             "/signal AAPL — current signal for any ticker\n"
-            "/scan — scan 70 stocks for BUY setups + wheel opportunities\n"
+            "/scan — screen 70 stocks for watchlist candidates + wheel ideas\n"
             "/briefing — send the US pre-open briefing now\n\n"
             "<b>System</b>\n"
             "/health — backend commit, watcher heartbeats, market regime\n"
@@ -1447,7 +1447,7 @@ async def handle_telegram_command(text: str):
         telegram_bot.send("🔍 Scanning 70 stocks — this takes ~30s…")
         try:
             scan = await run_screener_scan()
-            telegram_bot.send(telegram_bot.format_scan_results(scan))
+            telegram_bot.send(telegram_bot.format_scan_results(scan, tracked=db.get_watchlist()))
         except Exception as e:
             logging.warning(f"/scan error: {e}")
             telegram_bot.send(f"❌ Scan failed.\n<code>{e}</code>")
@@ -1698,7 +1698,7 @@ async def send_morning_briefing():
 
     # Run full screener scan and send separately so it doesn't get cut off
     scan = await run_screener_scan()
-    scan_msg = telegram_bot.format_scan_results(scan)
+    scan_msg = telegram_bot.format_scan_results(scan, tracked=db.get_watchlist())
     telegram_bot.send(scan_msg)
 
 

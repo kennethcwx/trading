@@ -338,7 +338,10 @@ def format_crypto_digest(rows: list[dict], sgd_to_usd: float = 0.74) -> str:
     return "\n".join(lines)
 
 
-def format_scan_results(results: dict) -> str:
+def format_scan_results(results: dict, tracked: list[str] | None = None) -> str:
+    # Screening ideas, not entry signals: nothing here fires an entry alert
+    # unless the symbol is on the watchlist, so every candidate line carries
+    # its /add hint instead of BUY styling (user request 2026-07-17).
     regime     = results["regime"]
     buys       = results["buy_signals"]
     watches    = results["watch_signals"]
@@ -346,38 +349,37 @@ def format_scan_results(results: dict) -> str:
     total      = results.get("total_scanned", 0)
     bullish    = regime.get("regime_ok", False)
     vix        = regime.get("vix", 0)
+    tracked    = tracked or []
 
     lines = [
-        f"🇺🇸 <b>US Market Scan — {total} stocks</b>",
+        f"🇺🇸 <b>US Screener — {total} stocks</b>",
         f"<code>Regime   {'BULLISH ▲' if bullish else 'BEARISH ▼'}\nVIX      {vix:.1f}</code>",
+        "",
+        "<i>Ideas for the watchlist, not buy signals — entries only confirm "
+        "on a daily close for tracked symbols.</i>",
         "",
     ]
 
-    # ── BUY setups ────────────────────────────────────────────────────────────
+    # ── Candidates (screener setups) ──────────────────────────────────────────
     if buys:
-        lines.append(f"🟢 <b>BUY Setups ({len(buys)})</b>")
+        lines.append(f"🔎 <b>Candidates ({len(buys)})</b>")
         for b in buys:
             a    = b["analysis"]
             fund = b["fundamentals"]
-            ps   = b["position_size"]
             grade = (fund.get("grade") or "ETF") if fund and not fund.get("is_etf") else "ETF"
             reason = b["signal"]["reasons"][0]
             rs_str = f"  RS {b['rs_rank']}th" if b.get("rs_rank") is not None else ""
             trade_type = b["signal"].get("trade_type", "")
             type_tag = f"  {trade_type}" if trade_type else ""
-            size_str = (
-                f"\n  <code>Size  {ps['shares']:.3f} sh  S${ps['position_value_sgd']:.0f}</code>"
-                if ps else ""
-            )
+            hint = ("already tracked — a real alert will confirm at the close"
+                    if b["symbol"] in tracked else f"📝 /add {b['symbol']} to track it")
             lines.append(
-                f"\n<b>{b['symbol']}</b>  [{grade}]{rs_str}{type_tag}\n"
+                f"\n<b>{b['symbol']}</b>  [{grade}]{rs_str}{type_tag}  ~${a['price']:.2f}\n"
                 f"  {reason}\n"
-                f"  <code>Entry ~${a['price']:.2f}  Stop ${a['stop_loss']:.2f}  "
-                f"Target ${a['profit_target']:.2f}</code>"
-                f"{size_str}"
+                f"  {hint}"
             )
     else:
-        lines.append("🟢 <b>BUY Setups</b>  none — market may be extended")
+        lines.append("🔎 <b>Candidates</b>  none — market may be extended")
 
     # ── Close to entry ────────────────────────────────────────────────────────
     if watches:
@@ -400,11 +402,12 @@ def format_scan_results(results: dict) -> str:
                 f"Strike ${w['strike']}  Collateral S${w['collateral_sgd']:,.0f}\n"
                 f"  {w['options_signal']['reason']}"
             )
+        lines += ["", "<i>Verify IVR &gt; 30 before any options trade.</i>"]
 
     if not buys and not watches and not wheels:
-        lines += ["", "Nothing actionable right now. Check back after the next move."]
+        lines += ["", "Nothing notable right now. Check back after the next move."]
 
-    lines += ["", "<i>Verify IVR &gt; 30 before any options trade. Not financial advice.</i>"]
+    lines += ["", "<i>Not financial advice.</i>"]
     return "\n".join(lines)
 
 
@@ -492,7 +495,7 @@ def set_bot_commands() -> bool:
         {"command": "health",     "description": "Backend commit, watcher heartbeats, market regime"},
         {"command": "crypto",     "description": "Current signal for BTC, ETH, SOL"},
         {"command": "signal",     "description": "Signal for any ticker — /signal AAPL"},
-        {"command": "scan",       "description": "Scan 70 stocks for BUY setups + wheel opportunities"},
+        {"command": "scan",       "description": "Screen 70 stocks for watchlist candidates + wheel ideas"},
         {"command": "briefing",   "description": "Send the US pre-open briefing now"},
         {"command": "watchlist",  "description": "Show your watchlist"},
         {"command": "add",        "description": "Add ticker — /add AAPL"},
