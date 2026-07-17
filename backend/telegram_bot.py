@@ -374,8 +374,10 @@ def format_scan_results(results: dict, tracked: list[str] | None = None) -> str:
             hint = ("already tracked — a real alert will confirm at the close"
                     if b["symbol"] in tracked else f"📝 /add {b['symbol']} to track it")
             lines.append(
-                f"\n<b>{b['symbol']}</b>  [{grade}]{rs_str}{type_tag}  ~${a['price']:.2f}\n"
+                f"\n<b>{b['symbol']}</b>  [{grade}]{rs_str}{type_tag}\n"
                 f"  {reason}\n"
+                f"  <code>Entry ~${a['price']:.2f}  Stop ${a['stop_loss']:.2f}  "
+                f"Target ${a['profit_target']:.2f}</code>\n"
                 f"  {hint}"
             )
     else:
