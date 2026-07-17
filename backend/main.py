@@ -1681,7 +1681,12 @@ async def send_morning_briefing():
         action = signal["action"]
         reason = signal["reasons"][0] if signal["reasons"] else signal["suggested_action"]
         if action in ACTIONABLE:
-            actionable_signals.append({"symbol": symbol, "action": action, "reason": reason})
+            a = d["analysis"]
+            actionable_signals.append({
+                "symbol": symbol, "action": action, "reason": reason,
+                "price": a.get("price"), "stop": a.get("stop_loss"),
+                "target": a.get("profit_target"),
+            })
         elif action == "WATCH":
             watch_signals.append({"symbol": symbol, "reason": reason})
 

@@ -447,6 +447,11 @@ def format_morning_briefing(
     if actionable_signals:
         for s in actionable_signals:
             lines.append(f"• <b>{s['action'].replace('_', ' ')} {s['symbol']}</b> — {s['reason']}")
+            price, stop, target = s.get("price"), s.get("stop"), s.get("target")
+            if s["action"] == "BUY" and price and stop and target:
+                lines.append(f"  <code>Entry ~${price:.2f}  Stop ${stop:.2f}  Target ${target:.2f}</code>")
+            elif price:
+                lines.append(f"  <code>Price ${price:.2f}</code>")
         lines.append("<i>Re-checked against the latest completed close — a queued entry from the 7:30 AM summary that isn't listed here is no longer valid.</i>")
     else:
         lines.append("• Nothing to do — hold positions as planned")
