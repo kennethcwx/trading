@@ -21,9 +21,9 @@ import futu_broker
 import db
 import telegram_bot
 import news
-from analysis import get_market_regime, get_crypto_regime, get_sgx_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, get_return_since, invalidate_cache
+from analysis import get_market_regime, get_crypto_regime, get_sgx_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, get_return_since, get_holding_events, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO
+from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, SGX_HOLDINGS, HOLDINGS_MOVE_ALERT_PCT, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1328,7 +1328,7 @@ async def _send_health():
     commit = os.getenv("RENDER_GIT_COMMIT", "")[:7] or "local"
     now = datetime.now(SGT)
     hb_rows = []
-    for name in ("us_scan", "us_entry_scan", "sgx_scan", "sgx_entry_scan", "crypto_scan", "news_scan"):
+    for name in ("us_scan", "us_entry_scan", "sgx_scan", "sgx_entry_scan", "crypto_scan", "news_scan", "holdings_scan"):
         ts = _heartbeats.get(name)
         if ts:
             try:
@@ -1707,6 +1707,122 @@ async def send_morning_briefing():
     telegram_bot.send(scan_msg)
 
 
+def _holdings_entry_hint(a: dict, signal_action: str) -> str:
+    """Long-term entry read for an owned SGX stock. These are multi-year holds,
+    so the anchor is trend intactness + pullback depth, not the swing setup's
+    stop/target geometry."""
+    money = telegram_bot.money_for("SGX")
+    if signal_action == "BUY":
+        return "⚡ Add zone — oversold pullback with the uptrend intact"
+    if not a["above_200sma"]:
+        return f"⚠️ Below the 200 SMA ({money(a['sma200'])}) — wait for a reclaim before adding"
+    if a["rsi"] >= 70:
+        return f"⚠️ Overbought (RSI {a['rsi']:.0f}) — poor add point; not a sell signal on a long-term hold"
+    if a["rsi"] <= 45:
+        return f"📋 Reasonable add zone — RSI {a['rsi']:.0f}, uptrend intact"
+    ext = (a["price"] / a["sma200"] - 1) * 100
+    return f"📋 Hold off — {ext:+.0f}% above the 200 SMA; better adds near {money(a['sma200'])}"
+
+
+async def _build_holdings_block(sgx_analysis: dict[str, dict], regime: dict) -> list[str]:
+    """Real-holdings section of the SGX Pre-Open. sgx_analysis maps bare codes
+    to already-fetched analysis dicts; anything missing is fetched here."""
+    loop = asyncio.get_event_loop()
+    money = telegram_bot.money_for("SGX")
+    rows, notes = [], []
+    for symbol in SGX_HOLDINGS:
+        a = sgx_analysis.get(symbol)
+        if a is None:
+            a = await loop.run_in_executor(None, get_ticker_analysis, f"{symbol}.SI")
+        if a is None:
+            notes.append(f"• {symbol} — no data today")
+            continue
+        chg = await loop.run_in_executor(None, news.get_daily_pct_change, f"{symbol}.SI")
+        chg_str = f"{chg[0]:+.1f}%" if chg else "—"
+        trend = "▲ trend" if a["above_200sma"] else "▼ trend"
+        rows.append(f"{symbol:<8}{money(a['price'])}  {chg_str} · RSI {a['rsi']:.0f} · {trend}")
+        signal = generate_signal(a, None, regime, variant="SWING_LOW_NOCAP")
+        notes.append(f"• {symbol} — {_holdings_entry_hint(a, signal['action'])}")
+        events = await loop.run_in_executor(None, get_holding_events, f"{symbol}.SI")
+        ev_bits = []
+        if events["days_to_ex_div"] is not None and 0 <= events["days_to_ex_div"] <= 14:
+            ev_bits.append(f"ex-div {events['ex_dividend_date']} ({events['days_to_ex_div']}d)")
+        if events["days_to_earnings"] is not None and 0 <= events["days_to_earnings"] <= 21:
+            ev_bits.append(f"results {events['earnings_date']} ({events['days_to_earnings']}d)")
+        if ev_bits:
+            notes.append(f"• {symbol} — 📝 " + " · ".join(ev_bits))
+    if not rows:
+        return []
+    return ["", "💼 <b>Your Holdings</b>",
+            "<code>" + "\n".join(rows) + "</code>"] + notes
+
+
+async def holdings_watcher():
+    """Intraday monitor for real long-term holdings (SGX_HOLDINGS), separate
+    from the paper strategy: big daily moves (with headlines) plus technical
+    state changes — 200 SMA break/reclaim and RSI crossing overbought (70).
+    State is in-memory: the first pass after a restart baselines silently, so
+    redeploys never re-alert an unchanged state."""
+    trend_state: dict[str, bool] = {}
+    rsi_hot: dict[str, bool] = {}
+    move_alerted: dict[str, str] = {}
+    money = telegram_bot.money_for("SGX")
+    await asyncio.sleep(120)
+    while True:
+        try:
+            if _sgx_market_is_open():
+                _beat("holdings_scan")
+                loop = asyncio.get_event_loop()
+                today = datetime.now(SGT).strftime("%Y-%m-%d")
+                for symbol in SGX_HOLDINGS:
+                    yf_symbol = f"{symbol}.SI"
+                    a = await loop.run_in_executor(None, get_ticker_analysis, yf_symbol)
+                    if a is None:
+                        continue
+
+                    if move_alerted.get(symbol) != today:
+                        chg = await loop.run_in_executor(None, news.get_daily_pct_change, yf_symbol)
+                        if chg and abs(chg[0]) >= HOLDINGS_MOVE_ALERT_PCT:
+                            pct, _price = chg
+                            icon = "📈" if pct > 0 else "📉"
+                            lines = [f"{icon} <b>Holding Move — {symbol}</b> · 🇸🇬",
+                                     f"<code>Price    {money(a['price'])}\nDay      {pct:+.1f}%</code>"]
+                            headlines = await loop.run_in_executor(
+                                None, news.get_recent_news, yf_symbol, NEWS_HEADLINES_PER_TICKER)
+                            if headlines:
+                                lines += [""] + [f"• {h['title']}" for h in headlines]
+                            telegram_bot.send("\n".join(lines))
+                            move_alerted[symbol] = today
+
+                    above = bool(a["above_200sma"])
+                    prev = trend_state.get(symbol)
+                    if prev is not None and above != prev:
+                        if above:
+                            telegram_bot.send(
+                                f"🟢 <b>Trend Reclaimed — {symbol}</b> · 🇸🇬\n"
+                                f"<code>Price    {money(a['price'])}\n200 SMA  {money(a['sma200'])}</code>\n"
+                                "📋 Long-term uptrend restored — add zone reopens on pullbacks")
+                        else:
+                            telegram_bot.send(
+                                f"⚠️ <b>Trend Break — {symbol}</b> · 🇸🇬\n"
+                                f"<code>Price    {money(a['price'])}\n200 SMA  {money(a['sma200'])}</code>\n"
+                                "📋 Closed below the 200 SMA — pause adding; review if it stays below for weeks")
+                    trend_state[symbol] = above
+
+                    hot = a["rsi"] >= 70
+                    prev_hot = rsi_hot.get(symbol)
+                    if prev_hot is not None and hot and not prev_hot:
+                        telegram_bot.send(
+                            f"⚠️ <b>Overbought — {symbol}</b> · 🇸🇬\n"
+                            f"<code>Price    {money(a['price'])}\nRSI      {a['rsi']:.0f}</code>\n"
+                            "📋 Stretched — poor add point; no action needed on a long-term hold")
+                    rsi_hot[symbol] = hot
+        except Exception as e:
+            logging.warning(f"holdings watcher error: {e}")
+        # 15 min matches the analysis cache TTL, same reasoning as sgx_watcher
+        await asyncio.sleep(15 * 60)
+
+
 async def send_sgx_morning_briefing():
     loop = asyncio.get_event_loop()
     now_sgt = datetime.now(SGT)
@@ -1766,6 +1882,9 @@ async def send_sgx_morning_briefing():
     if watching:
         lines += ["", "👀 <b>Watch closely</b>"]
         lines.extend(watching)
+
+    sgx_analysis = {d["symbol"].replace(".SI", ""): d["analysis"] for d in sgx_data}
+    lines += await _build_holdings_block(sgx_analysis, regime)
 
     telegram_bot.send("\n".join(lines))
 
@@ -1934,6 +2053,7 @@ async def lifespan(app: FastAPI):
     crypto = asyncio.create_task(crypto_watcher())
     sgx = asyncio.create_task(sgx_watcher())
     news_task = asyncio.create_task(news_watcher())
+    holdings = asyncio.create_task(holdings_watcher())
     listener = asyncio.create_task(telegram_command_listener())
     briefing = asyncio.create_task(morning_briefing_task())
     sgx_briefing = asyncio.create_task(sgx_briefing_task())
@@ -1947,6 +2067,7 @@ async def lifespan(app: FastAPI):
     watcher.cancel()
     crypto.cancel()
     news_task.cancel()
+    holdings.cancel()
     listener.cancel()
     briefing.cancel()
     us_summary.cancel()

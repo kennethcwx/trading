@@ -113,6 +113,13 @@ SGX_WATCHLIST = [
 ]
 SGX_PORTFOLIO_SGD = 5000     # paper capital allocation for SGX (cash-only, no margin)
 
+# Real long-term SG holdings (bare SGX codes) — monitored independently of the
+# paper strategy: holdings block in the SGX Pre-Open, intraday big-move alerts,
+# trend-break/overbought warnings, and accumulation hints for adding on dips.
+# Prices only — no cost basis is stored anywhere.
+SGX_HOLDINGS = ["D05", "O39"]
+HOLDINGS_MOVE_ALERT_PCT = 2.5   # intraday move that triggers a holdings alert
+
 # News feed — zero-cost: yfinance headlines only, no Claude/LLM calls.
 # A ticker crossing this threshold gets its recent headlines stored once per day.
 NEWS_MOVE_THRESHOLD_PCT = 3.0

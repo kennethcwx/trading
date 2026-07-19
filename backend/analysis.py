@@ -283,6 +283,50 @@ def get_ticker_analysis(symbol: str) -> dict | None:
     }
 
 
+def get_holding_events(symbol: str) -> dict:
+    """Ex-dividend and earnings dates for a long-term holding. Cached 6h —
+    corporate calendars don't move intraday. SGX coverage on yfinance is
+    spotty, so every lookup degrades to None rather than raising."""
+    key = f"holding_events:{symbol}"
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry and time.time() - entry["ts"] < 6 * 3600:
+            return entry["data"]
+
+    ex_div = None
+    earnings = None
+    try:
+        cal = yf.Ticker(symbol).calendar
+        if isinstance(cal, dict):
+            ed = cal.get("Ex-Dividend Date")
+            if ed is not None:
+                ex_div = ed.date() if hasattr(ed, "date") else ed
+            dates = cal.get("Earnings Date")
+            if dates:
+                raw = dates[0] if isinstance(dates, (list, pd.Series)) else dates
+                earnings = raw.date() if hasattr(raw, "date") else raw
+    except Exception:
+        pass
+    if ex_div is None:
+        try:
+            raw = yf.Ticker(symbol).info.get("exDividendDate")
+            if raw:
+                ex_div = datetime.fromtimestamp(raw).date()
+        except Exception:
+            pass
+
+    today = datetime.today().date()
+    data = {
+        "ex_dividend_date": str(ex_div) if ex_div else None,
+        "days_to_ex_div": (ex_div - today).days if ex_div else None,
+        "earnings_date": str(earnings) if earnings else None,
+        "days_to_earnings": (earnings - today).days if earnings else None,
+    }
+    with _cache_lock:
+        _cache[key] = {"ts": time.time(), "data": data}
+    return data
+
+
 def get_fundamentals(symbol: str) -> dict:
     """
     Fundamental score for stocks. ETFs get is_etf=True and no scoring.
