@@ -1845,27 +1845,36 @@ async def send_sgx_morning_briefing():
         for r in open_rows if r["symbol"] in SGX_WATCHLIST
     }
 
+    money = telegram_bot.money_for("SGX")
     actionable, watching = [], []
     for d in sgx_data:
         symbol = d["symbol"].replace(".SI", "")
+        a = d["analysis"]
         position = sgx_position_map.get(symbol)
         # Must match the sgx_watcher variant or briefing and alerts disagree
-        signal = generate_signal(d["analysis"], position, regime,
-                                 variant="SWING_LOW_NOCAP")
+        signal = generate_signal(a, position, regime, variant="SWING_LOW_NOCAP")
         action = signal["action"]
-        price = d["analysis"]["price"]
+        price = a["price"]
         reason = signal["reasons"][0] if signal["reasons"] else signal["suggested_action"]
         if action in ACTIONABLE:
-            actionable.append(f"• <b>{action} {symbol}</b> @ S${price:.3f} — {reason}")
+            # Mirror the US briefing: action-first line, then a levels sub-line
+            # (swing stop/target for BUYs, current price for exits).
+            actionable.append(f"• <b>{action.replace('_', ' ')} {symbol}</b> — {reason}")
+            stop, target = a.get("stop_loss_swing"), a.get("profit_target_swing")
+            if action == "BUY" and price and stop and target:
+                actionable.append(f"  <code>Entry ~{money(price)}  Stop {money(stop)}  Target {money(target)}</code>")
+            elif price:
+                actionable.append(f"  <code>Price {money(price)}</code>")
         elif action == "WATCH":
-            watching.append(f"• {symbol} @ S${price:.3f} — {reason}")
+            watching.append(f"• {symbol} @ {money(price)} — {reason}")
 
     regime_str = regime.get("regime", "—")
     arrow = " ▲" if regime_str == "BULLISH" else (" ▼" if regime_str == "BEARISH" else "")
     vix = regime.get("vix")
     market_block = f"Regime   {regime_str}{arrow} ({regime.get('basis', 'STI')})"
     if isinstance(vix, (int, float)):
-        market_block += f"\nVIX      {vix:.1f}"
+        vix_label = "calm" if vix < 20 else "elevated" if vix < 30 else "fearful"
+        market_block += f"\nVIX      {vix:.1f}  ({vix_label})"
     lines = [
         f"🇸🇬 <b>SGX Pre-Open — {now_sgt.strftime('%a %d %b')}</b>",
         "Opens <code>9:00 AM SGT</code>",
@@ -1879,12 +1888,17 @@ async def send_sgx_morning_briefing():
         lines.extend(actionable)
     else:
         lines.append("• Nothing to do — hold positions as planned")
+
+    # Order mirrors the US briefing: your own holdings first, then the
+    # (not-owned) strategy candidates, so the two are never confused.
+    sgx_analysis = {d["symbol"].replace(".SI", ""): d["analysis"] for d in sgx_data}
+    lines += await _build_holdings_block(sgx_analysis, regime)
+
     if watching:
         lines += ["", "👀 <b>Watch closely</b>"]
         lines.extend(watching)
 
-    sgx_analysis = {d["symbol"].replace(".SI", ""): d["analysis"] for d in sgx_data}
-    lines += await _build_holdings_block(sgx_analysis, regime)
+    lines += ["", "<i>Doesn't account for SG public holidays · verify before trading</i>"]
 
     telegram_bot.send("\n".join(lines))
 
