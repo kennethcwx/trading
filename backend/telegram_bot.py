@@ -507,6 +507,7 @@ def set_bot_commands() -> bool:
         {"command": "signal",     "description": "Signal for any ticker — /signal AAPL"},
         {"command": "scan",       "description": "Screen 70 stocks for watchlist candidates + wheel ideas"},
         {"command": "briefing",   "description": "Send the US pre-open briefing now"},
+        {"command": "sgxbriefing", "description": "Send the SGX pre-open briefing now"},
         {"command": "watchlist",  "description": "Show your watchlist"},
         {"command": "add",        "description": "Add ticker — /add AAPL"},
         {"command": "remove",     "description": "Remove ticker — /remove AAPL"},

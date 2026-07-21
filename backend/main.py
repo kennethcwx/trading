@@ -1380,7 +1380,8 @@ async def handle_telegram_command(text: str):
             "/crypto — current signal for BTC, ETH, SOL\n"
             "/signal AAPL — current signal for any ticker\n"
             "/scan — screen 70 stocks for watchlist candidates + wheel ideas\n"
-            "/briefing — send the US pre-open briefing now\n\n"
+            "/briefing — send the US pre-open briefing now\n"
+            "/sgxbriefing — send the SGX pre-open briefing now\n\n"
             "<b>System</b>\n"
             "/health — backend commit, watcher heartbeats, market regime\n"
             "/watchlist · /add AAPL · /remove AAPL"
@@ -1411,6 +1412,14 @@ async def handle_telegram_command(text: str):
         except Exception as e:
             logging.warning(f"/briefing error: {e}")
             telegram_bot.send(f"❌ Briefing failed — check backend logs.\n<code>{e}</code>")
+
+    elif cmd == "/sgxbriefing":
+        telegram_bot.send("⏳ Generating SGX briefing…")
+        try:
+            await send_sgx_morning_briefing()
+        except Exception as e:
+            logging.warning(f"/sgxbriefing error: {e}")
+            telegram_bot.send(f"❌ SGX briefing failed — check backend logs.\n<code>{e}</code>")
 
     elif cmd == "/fill":
         # Report the real moomoo paper fill for the latest SGX order alert:
