@@ -91,7 +91,7 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
     if earnings_warning:
         return _signal("WATCH", "LOW",
                        [f"Earnings in {days_to_earnings} days — wait until after to enter"],
-                       "Re-evaluate after earnings")
+                       "Re-evaluate after earnings", watch_kind="blocked")
 
     # Strategy D uses the swing-low stop/target computed in analysis.py
     if variant == "SWING_LOW_NOCAP":
@@ -132,13 +132,15 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         if variant != "MEAN_REV_NO_RS" and rs_rank is not None and rs_rank < 75:
             return _signal("WATCH", "LOW",
                            [f"{label} triggered but RS rank {rs_rank}th percentile — needs top 25%"],
-                           f"Wait for relative strength to improve · currently ranked {rs_rank}th percentile vs watchlist")
+                           f"Wait for relative strength to improve · currently ranked {rs_rank}th percentile vs watchlist",
+                           watch_kind="blocked")
 
         # ── Filter 2: Sector confirmation — sector ETF must be above 200 SMA ──
         if sector_ok is False:
             return _signal("WATCH", "LOW",
                            [f"{label} triggered but sector ETF below 200 SMA — sector in downtrend"],
-                           "Wait for sector ETF to reclaim 200 SMA before entering")
+                           "Wait for sector ETF to reclaim 200 SMA before entering",
+                           watch_kind="blocked")
 
         if mean_rev:
             tech_reasons = [f"RSI {rsi:.0f} below {RSI_ENTRY} + above 200 SMA"]
@@ -178,7 +180,8 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
                 return _signal("WATCH", "MEDIUM",
                                [f"Tech triggered, fundamentals mixed (grade {grade}){rs_flag}",
                                 *tech_reasons, *bad[:1]],
-                               "Possible entry at reduced size — verify fundamentals first")
+                               "Possible entry at reduced size — verify fundamentals first",
+                               watch_kind="blocked")
 
             # Grade B (3) or A (4-5)
             all_reasons = tech_reasons + [f"Fundamentals grade {grade}: {', '.join(good[:2])}"]
@@ -208,8 +211,9 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
 
         return _signal(
             "WATCH", "LOW",
-            [f"RSI {rsi:.0f} — {pts_away} pts from trigger"],
+            [f"RSI {rsi:.0f} — {pts_away} pts from the RSI-{RSI_ENTRY} pullback entry"],
             f"{proximity} · At current price: Stop ${stop:.2f} · Target ${target:.2f}",
+            watch_kind="approaching",
         )
 
     reasons = []
@@ -261,7 +265,7 @@ def calculate_position_size(portfolio_sgd: float, price_usd: float,
 
 
 def _signal(action: str, priority: str, reasons: list[str], suggested: str,
-            trade_type: str | None = None) -> dict:
+            trade_type: str | None = None, watch_kind: str | None = None) -> dict:
     result = {
         "action": action,
         "priority": priority,
@@ -270,4 +274,9 @@ def _signal(action: str, priority: str, reasons: list[str], suggested: str,
     }
     if trade_type:
         result["trade_type"] = trade_type
+    # "approaching" (near a trigger) vs "blocked" (triggered/near but held back by
+    # a filter: earnings window, RS rank, sector downtrend, mixed fundamentals).
+    # Presentation only — lets the briefings split the Watch list into two groups.
+    if watch_kind:
+        result["watch_kind"] = watch_kind
     return result

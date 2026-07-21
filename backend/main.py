@@ -1682,13 +1682,16 @@ async def send_morning_briefing():
         reason = signal["reasons"][0] if signal["reasons"] else signal["suggested_action"]
         if action in ACTIONABLE:
             a = d["analysis"]
+            fund = d["fundamentals"]
+            grade = fund.get("grade") if fund and not fund.get("is_etf") else None
             actionable_signals.append({
                 "symbol": symbol, "action": action, "reason": reason,
                 "price": a.get("price"), "stop": a.get("stop_loss"),
-                "target": a.get("profit_target"),
+                "target": a.get("profit_target"), "grade": grade,
             })
         elif action == "WATCH":
-            watch_signals.append({"symbol": symbol, "reason": reason})
+            watch_signals.append({"symbol": symbol, "reason": reason,
+                                  "kind": signal.get("watch_kind", "approaching")})
 
     msg = telegram_bot.format_morning_briefing(
         date_str=now_et.strftime("%a %d %b"),
@@ -1866,7 +1869,8 @@ async def send_sgx_morning_briefing():
             elif price:
                 actionable.append(f"  <code>Price {money(price)}</code>")
         elif action == "WATCH":
-            watching.append(f"• {symbol} @ {money(price)} — {reason}")
+            watching.append({"line": f"• {symbol} @ {money(price)} — {reason}",
+                             "kind": signal.get("watch_kind", "approaching")})
 
     regime_str = regime.get("regime", "—")
     arrow = " ▲" if regime_str == "BULLISH" else (" ▼" if regime_str == "BEARISH" else "")
@@ -1874,7 +1878,10 @@ async def send_sgx_morning_briefing():
     market_block = f"Regime   {regime_str}{arrow} ({regime.get('basis', 'STI')})"
     if isinstance(vix, (int, float)):
         vix_label = "calm" if vix < 20 else "elevated" if vix < 30 else "fearful"
-        market_block += f"\nVIX      {vix:.1f}  ({vix_label})"
+        # VIX is the US volatility index — shown as context, but SGX entries gate
+        # on the STI's own 200 SMA (basis above), not VIX. Labelled to avoid
+        # implying it drives SGX decisions.
+        market_block += f"\nVIX (US) {vix:.1f}  ({vix_label})"
     lines = [
         f"🇸🇬 <b>SGX Pre-Open — {now_sgt.strftime('%a %d %b')}</b>",
         "Opens <code>9:00 AM SGT</code>",
@@ -1894,9 +1901,16 @@ async def send_sgx_morning_briefing():
     sgx_analysis = {d["symbol"].replace(".SI", ""): d["analysis"] for d in sgx_data}
     lines += await _build_holdings_block(sgx_analysis, regime)
 
-    if watching:
-        lines += ["", "👀 <b>Watch closely</b>"]
-        lines.extend(watching)
+    # Split the watch list: "Approaching" (near a trigger) vs "Blocked"
+    # (triggered/near but held back by a filter). Same grouping as the US briefing.
+    approaching = [w["line"] for w in watching if w["kind"] != "blocked"]
+    blocked = [w["line"] for w in watching if w["kind"] == "blocked"]
+    if approaching:
+        lines += ["", "👀 <b>Approaching</b>"]
+        lines.extend(approaching)
+    if blocked:
+        lines += ["", "⏸️ <b>Blocked</b>"]
+        lines.extend(blocked)
 
     lines += ["", "<i>Doesn't account for SG public holidays · verify before trading</i>"]
 

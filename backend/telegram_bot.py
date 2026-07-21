@@ -439,7 +439,9 @@ def format_morning_briefing(
     lines += ["", f"⚡ <b>Act at open ({open_time_sgt} SGT)</b>"]
     if actionable_signals:
         for s in actionable_signals:
-            lines.append(f"• <b>{s['action'].replace('_', ' ')} {s['symbol']}</b> — {s['reason']}")
+            grade = s.get("grade")
+            grade_tag = f" [{grade}]" if grade else ""
+            lines.append(f"• <b>{s['action'].replace('_', ' ')} {s['symbol']}{grade_tag}</b> — {s['reason']}")
             price, stop, target = s.get("price"), s.get("stop"), s.get("target")
             if s["action"] == "BUY" and price and stop and target:
                 lines.append(f"  <code>Entry ~${price:.2f}  Stop ${stop:.2f}  Target ${target:.2f}</code>")
@@ -463,9 +465,17 @@ def format_morning_briefing(
     else:
         lines += ["", "📋 <b>Open Positions</b>  none"]
 
-    if watch_signals:
-        lines += ["", "👀 <b>Watch closely</b>"]
-        for s in watch_signals:
+    # Split the watch list: "Approaching" (near a trigger) vs "Blocked"
+    # (triggered/near but held back by a filter — earnings, RS rank, sector).
+    approaching = [s for s in watch_signals if s.get("kind") != "blocked"]
+    blocked = [s for s in watch_signals if s.get("kind") == "blocked"]
+    if approaching:
+        lines += ["", "👀 <b>Approaching</b>"]
+        for s in approaching:
+            lines.append(f"• {s['symbol']} — {s['reason']}")
+    if blocked:
+        lines += ["", "⏸️ <b>Blocked</b>"]
+        for s in blocked:
             lines.append(f"• {s['symbol']} — {s['reason']}")
 
     lines += ["", "<i>Doesn't account for US public holidays · verify before trading</i>"]
