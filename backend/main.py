@@ -1897,6 +1897,21 @@ async def send_sgx_morning_briefing():
         "",
         "📊 <b>Market</b>",
         f"<code>{market_block}</code>",
+    ]
+
+    # Your real holdings (D05/O39) lead the briefing as one contiguous block —
+    # never interleaved with the not-owned strategy candidates below.
+    sgx_analysis = {d["symbol"].replace(".SI", ""): d["analysis"] for d in sgx_data}
+    lines += await _build_holdings_block(sgx_analysis, regime)
+
+    # Everything below is the paper strategy's 27-name screener: buy candidates
+    # and watch-list ideas, none of which are owned. A divider + banner keeps the
+    # separation from "Your Holdings" unmistakable on a phone.
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━",
+        "📈 <b>Paper strategy · not owned</b>",
+        "<i>Ideas from the 27-name screener</i>",
         "",
         "⚡ <b>Act at open (9:00 AM SGT)</b>",
     ]
@@ -1904,11 +1919,6 @@ async def send_sgx_morning_briefing():
         lines.extend(actionable)
     else:
         lines.append("• Nothing to do — hold positions as planned")
-
-    # Order mirrors the US briefing: your own holdings first, then the
-    # (not-owned) strategy candidates, so the two are never confused.
-    sgx_analysis = {d["symbol"].replace(".SI", ""): d["analysis"] for d in sgx_data}
-    lines += await _build_holdings_block(sgx_analysis, regime)
 
     # Split the watch list: "Approaching" (near a trigger) vs "Blocked"
     # (triggered/near but held back by a filter). Same grouping as the US briefing.
