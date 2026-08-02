@@ -23,7 +23,7 @@ import telegram_bot
 import news
 from analysis import get_market_regime, get_crypto_regime, get_sgx_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, get_return_since, get_holding_events, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, SGX_HOLDINGS, HOLDINGS_MOVE_ALERT_PCT, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO
+from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, SGX_HOLDINGS, HOLDINGS_MOVE_ALERT_PCT, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, MAX_SECTOR_PCT, TICKER_SECTORS, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO
 
 logging.basicConfig(level=logging.INFO)
 
@@ -248,6 +248,56 @@ def _sgx_equity_sgd() -> float:
         return SGX_PORTFOLIO_SGD
 
 
+def _sector_note(symbol: str, market: str, new_value_sgd: float | None,
+                 sgd_to_usd: float) -> str | None:
+    """Warn when a BUY would push one sector past MAX_SECTOR_PCT of its pool.
+
+    Advisory only — the signal, sizing and stops are untouched. MAX_SECTOR_PCT
+    has always been a stated portfolio rule with nothing surfacing it at the
+    moment of decision, which is the only moment it matters.
+
+    Pools are kept separate (SGX has its own capital), and US position values
+    convert to SGD so the comparison is against the same equity basis the
+    sizer used. Returns None whenever it can't answer confidently — an
+    unmapped ticker, an empty book, or a failed query must never block an alert.
+    """
+    if not new_value_sgd:
+        return None
+    sector = TICKER_SECTORS.get(symbol.replace(".SI", "").upper())
+    if not sector:
+        return None
+    try:
+        is_sgx = market == "SGX"
+        scope = "strategy = 'SGX'" if is_sgx else "(strategy IS NULL OR strategy != 'SGX')"
+        rows = db.fetch(
+            f"SELECT symbol, shares, entry_price FROM trades WHERE exit_price IS NULL AND {scope}"
+        )
+        equity = _sgx_equity_sgd() if is_sgx else _us_equity_sgd(sgd_to_usd)
+        if equity <= 0:
+            return None
+
+        held, exposure = [], 0.0
+        for r in rows:
+            sym = str(r["symbol"]).replace(".SI", "").upper()
+            if TICKER_SECTORS.get(sym) != sector:
+                continue
+            value = r["shares"] * r["entry_price"]
+            if not is_sgx and sgd_to_usd:
+                value /= sgd_to_usd          # US trades are priced in USD
+            exposure += value
+            held.append(sym)
+
+        pct = (exposure + new_value_sgd) / equity
+        if pct <= MAX_SECTOR_PCT:
+            return None
+        tail = f"already open: {', '.join(sorted(set(held)))}" if held else "this position alone"
+        return (f"⚠️ {sector} would be {pct * 100:.0f}% of the pool "
+                f"(cap {MAX_SECTOR_PCT * 100:.0f}%) — {tail}")
+    except Exception as e:
+        logging.warning(f"Sector exposure check failed for {symbol}: {e}")
+        return None
+
+
 def _sgx_market_is_open() -> bool:
     now = datetime.now(SGT)
     if now.weekday() >= 5:
@@ -359,7 +409,12 @@ async def signal_watcher():
                             )
 
                     msg = telegram_bot.format_signal(
-                        symbol, signal, d["analysis"], pos_size, d["fundamentals"]
+                        symbol, signal, d["analysis"], pos_size, d["fundamentals"],
+                        sector_note=_sector_note(
+                            symbol, "US",
+                            pos_size.get("position_value_sgd") if pos_size else None,
+                            sgd_to_usd,
+                        ),
                     )
                     _send_or_queue_us("A", symbol, action, signal["suggested_action"], msg,
                                       is_exit=position is not None)
@@ -778,7 +833,12 @@ async def sgx_watcher():
                             logging.warning(f"SGX pending-fill log failed for {symbol}: {e}")
 
                     msg = telegram_bot.format_signal(symbol, signal, d["analysis"], msg_pos, d["fundamentals"],
-                                                     stop=sgx_stop, target=sgx_target, market="SGX")
+                                                     stop=sgx_stop, target=sgx_target, market="SGX",
+                                                     sector_note=_sector_note(
+                                                         symbol, "SGX",
+                                                         msg_pos.get("position_value_sgd") if msg_pos else None,
+                                                         regime.get("sgd_to_usd", 0.74),
+                                                     ))
                     telegram_bot.send(msg + order_note)
                     _log_event("SGX", f"{action} {symbol} @ S${price:.3f} — {signal['suggested_action']}", sent=True)
 
@@ -1527,7 +1587,14 @@ async def handle_telegram_command(text: str):
                 pos_size = calculate_position_size(
                     PORTFOLIO_SIZE_SGD, analysis["price"], analysis["stop_loss"], sgd_to_usd, size_mult,
                 )
-            msg = telegram_bot.format_signal(symbol, signal, analysis, pos_size, fundamentals)
+            msg = telegram_bot.format_signal(
+                symbol, signal, analysis, pos_size, fundamentals,
+                sector_note=_sector_note(
+                    symbol, "US",
+                    pos_size.get("position_value_sgd") if pos_size else None,
+                    sgd_to_usd,
+                ),
+            )
             # Append sector ETF context
             if sector_status:
                 etf = sector_status["etf_symbol"]

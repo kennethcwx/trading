@@ -124,6 +124,7 @@ def format_signal(
     stop: float | None = None,
     target: float | None = None,
     market: str = "US",
+    sector_note: str | None = None,
 ) -> str:
     action = signal["action"]
     price = analysis.get("price", 0)
@@ -202,6 +203,10 @@ def format_signal(
         ]
         if position_size and position_size.get("note"):
             lines.append(f"\n<i>{position_size['note']}</i>")
+        # Caution before the call to action: the cap is a sizing decision, so it
+        # has to land before "⚡ execute", not after it.
+        if sector_note:
+            lines.append(f"\n{sector_note}")
         if is_crypto:
             lines.append("\n⚡ Crypto — enter when ready (24/7 market)")
         elif market == "SGX":

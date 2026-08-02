@@ -113,6 +113,52 @@ SGX_WATCHLIST = [
 ]
 SGX_PORTFOLIO_SGD = 5000     # paper capital allocation for SGX (cash-only, no margin)
 
+# Sector membership for the MAX_SECTOR_PCT concentration check on BUY alerts.
+# Static for the same reason as TICKER_NAMES: no network call on the alert path.
+# (analysis.get_sector_etf_status hits yfinance for the sector *trend* filter —
+# a different question, and one that can afford to fail.)
+# Broad index ETFs are deliberately absent: they aren't a sector, so they're
+# skipped, matching how the sector-trend filter already treats them.
+TICKER_SECTORS = {
+    # ── SGX ──
+    "D05": "Banks", "O39": "Banks", "U11": "Banks",
+    "A17U": "REITs", "C38U": "REITs", "ME8U": "REITs", "M44U": "REITs",
+    "N2IU": "REITs", "AJBU": "REITs", "BUOU": "REITs",
+    "9CI": "Real Estate", "C09": "Real Estate", "U14": "Real Estate",
+    "S63": "Industrials", "BN4": "Industrials", "U96": "Industrials", "BS6": "Industrials",
+    "C6L": "Transport", "C52": "Transport", "S58": "Transport",
+    "Z74": "Telco",
+    "S68": "Financials",
+    "V03": "Technology",
+    "F34": "Consumer", "G13": "Consumer", "C07": "Consumer", "Y92": "Consumer",
+    # ── US ──
+    "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
+    "AMD": "Technology", "INTC": "Technology", "QCOM": "Technology",
+    "AVGO": "Technology", "MU": "Technology", "TSM": "Technology",
+    "ARM": "Technology", "AMAT": "Technology", "LRCX": "Technology",
+    "CRM": "Technology", "ADBE": "Technology", "ORCL": "Technology",
+    "NOW": "Technology", "INTU": "Technology", "PANW": "Technology",
+    "SNOW": "Technology", "PLTR": "Technology", "DDOG": "Technology",
+    "IONQ": "Technology", "QBTS": "Technology", "RGTI": "Technology", "IBM": "Technology",
+    "GOOGL": "Communication Services", "META": "Communication Services",
+    "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
+    "HD": "Consumer Discretionary", "MCD": "Consumer Discretionary",
+    "SBUX": "Consumer Discretionary", "NKE": "Consumer Discretionary",
+    "LULU": "Consumer Discretionary", "CMG": "Consumer Discretionary",
+    "RBLX": "Consumer Discretionary", "F": "Consumer Discretionary",
+    "COST": "Consumer Staples", "TGT": "Consumer Staples",
+    "JPM": "Financials", "GS": "Financials", "MS": "Financials",
+    "BAC": "Financials", "WFC": "Financials", "V": "Financials",
+    "MA": "Financials", "AXP": "Financials", "COIN": "Financials",
+    "SOFI": "Financials", "HOOD": "Financials",
+    "UNH": "Health Care", "JNJ": "Health Care", "LLY": "Health Care",
+    "ABBV": "Health Care", "MRK": "Health Care", "AMGN": "Health Care",
+    "GILD": "Health Care", "REGN": "Health Care",
+    "XOM": "Energy", "CVX": "Energy", "OXY": "Energy", "SLB": "Energy",
+    "CAT": "Industrials", "DE": "Industrials", "RTX": "Industrials",
+    "HON": "Industrials", "GE": "Industrials", "BA": "Industrials",
+}
+
 # Display names for alert headers. Static on purpose: no network call at alert
 # time, so a yfinance outage or rate-limit can never delay or break a signal.
 # Short labels, not legal entity names — these are read on a phone, mid-scan.
