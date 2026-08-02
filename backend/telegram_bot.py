@@ -1,9 +1,10 @@
 import os
 import json
+import html
 import urllib.request
 import logging
 
-from config import PROFIT_RATIO
+from config import PROFIT_RATIO, TICKER_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,27 @@ def market_of(symbol: str) -> str:
     return "US"
 
 
+def name_for(symbol: str) -> str:
+    """Short company name for a symbol, or "" if we don't have one.
+
+    Escaped for HTML: names like "Johnson & Johnson" would otherwise break
+    Telegram's HTML parser and silently drop the whole message to plain text.
+    """
+    key = symbol.replace(".SI", "").replace("-USD", "").upper()
+    return html.escape(TICKER_NAMES.get(key, ""), quote=False)
+
+
+def label_for(symbol: str) -> str:
+    """"D05 · DBS Group" for prose lines; bare symbol when we have no name.
+
+    Prose only. Never use inside an aligned <code> block — the extra width
+    wraps the row on a phone and destroys the column alignment that makes
+    those tables scannable.
+    """
+    name = name_for(symbol)
+    return f"{symbol} · {name}" if name else symbol
+
+
 def money_for(market: str):
     cur = "S$" if market == "SGX" else "$"
     dp = 3 if market == "SGX" else 2
@@ -121,14 +143,19 @@ def format_signal(
     money = money_for(market)
     flag = MARKET_ICON.get(market, "")
 
+    # Ticker stays the first token after the action — it's what /fill takes.
+    # The name sits between it and the flag, and drops out cleanly when unmapped.
+    name = name_for(symbol)
+    tail = f" · {name} · {flag}" if name else f" · {flag}"
+
     HEADER = {
-        "BUY":       f"🟢 <b>BUY — {symbol}</b> · {flag}",
-        "SELL":      f"🔴 <b>SELL — {symbol}</b> · {flag}",
-        "SELL_HALF": f"🟠 <b>SELL HALF — {symbol}</b> · {flag}",
-        "REVIEW":    f"🟡 <b>REVIEW — {symbol}</b> · {flag}",
+        "BUY":       f"🟢 <b>BUY — {symbol}</b>{tail}",
+        "SELL":      f"🔴 <b>SELL — {symbol}</b>{tail}",
+        "SELL_HALF": f"🟠 <b>SELL HALF — {symbol}</b>{tail}",
+        "REVIEW":    f"🟡 <b>REVIEW — {symbol}</b>{tail}",
     }
 
-    lines = [HEADER.get(action, f"⚪ <b>{action} — {symbol}</b> · {flag}"), ""]
+    lines = [HEADER.get(action, f"⚪ <b>{action} — {symbol}</b>{tail}"), ""]
     lines.append(f"{trade_type} · {reason}" if trade_type else reason)
 
     if action == "BUY":
@@ -441,7 +468,7 @@ def format_morning_briefing(
         for s in actionable_signals:
             grade = s.get("grade")
             grade_tag = f" [{grade}]" if grade else ""
-            lines.append(f"• <b>{s['action'].replace('_', ' ')} {s['symbol']}{grade_tag}</b> — {s['reason']}")
+            lines.append(f"• <b>{s['action'].replace('_', ' ')} {label_for(s['symbol'])}{grade_tag}</b> — {s['reason']}")
             price, stop, target = s.get("price"), s.get("stop"), s.get("target")
             if s["action"] == "BUY" and price and stop and target:
                 lines.append(f"  <code>Entry ~${price:.2f}  Stop ${stop:.2f}  Target ${target:.2f}</code>")
@@ -472,11 +499,11 @@ def format_morning_briefing(
     if approaching:
         lines += ["", "👀 <b>Approaching</b>"]
         for s in approaching:
-            lines.append(f"• {s['symbol']} — {s['reason']}")
+            lines.append(f"• {label_for(s['symbol'])} — {s['reason']}")
     if blocked:
         lines += ["", "⏸️ <b>Blocked</b>"]
         for s in blocked:
-            lines.append(f"• {s['symbol']} — {s['reason']}")
+            lines.append(f"• {label_for(s['symbol'])} — {s['reason']}")
 
     lines += ["", "<i>Doesn't account for US public holidays · verify before trading</i>"]
     return "\n".join(lines)

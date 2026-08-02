@@ -1871,14 +1871,14 @@ async def send_sgx_morning_briefing():
         if action in ACTIONABLE:
             # Mirror the US briefing: action-first line, then a levels sub-line
             # (swing stop/target for BUYs, current price for exits).
-            actionable.append(f"• <b>{action.replace('_', ' ')} {symbol}</b> — {reason}")
+            actionable.append(f"• <b>{action.replace('_', ' ')} {telegram_bot.label_for(symbol)}</b> — {reason}")
             stop, target = a.get("stop_loss_swing"), a.get("profit_target_swing")
             if action == "BUY" and price and stop and target:
                 actionable.append(f"  <code>Entry ~{money(price)}  Stop {money(stop)}  Target {money(target)}</code>")
             elif price:
                 actionable.append(f"  <code>Price {money(price)}</code>")
         elif action == "WATCH":
-            watching.append({"line": f"• {symbol} @ {money(price)} — {reason}",
+            watching.append({"line": f"• {telegram_bot.label_for(symbol)} @ {money(price)} — {reason}",
                              "kind": signal.get("watch_kind", "approaching")})
 
     regime_str = regime.get("regime", "—")

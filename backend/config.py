@@ -113,6 +113,124 @@ SGX_WATCHLIST = [
 ]
 SGX_PORTFOLIO_SGD = 5000     # paper capital allocation for SGX (cash-only, no margin)
 
+# Display names for alert headers. Static on purpose: no network call at alert
+# time, so a yfinance outage or rate-limit can never delay or break a signal.
+# Short labels, not legal entity names — these are read on a phone, mid-scan.
+# Keys are bare SGX codes (the .SI suffix is stripped at lookup) and US tickers.
+# A symbol missing from this map simply renders without a name.
+TICKER_NAMES = {
+    # ── SGX ──
+    "D05": "DBS Group",
+    "O39": "OCBC Bank",
+    "U11": "UOB",
+    "A17U": "CapitaLand Ascendas REIT",
+    "C38U": "CapitaLand Integrated",
+    "ME8U": "Mapletree Industrial",
+    "M44U": "Mapletree Logistics",
+    "N2IU": "Mapletree PACT",
+    "AJBU": "Keppel DC REIT",
+    "BUOU": "Frasers Logistics & Comm",
+    "S63": "ST Engineering",
+    "S68": "Singapore Exchange",
+    "U96": "Sembcorp Industries",
+    "BN4": "Keppel",
+    "9CI": "CapitaLand Investment",
+    "C09": "City Developments",
+    "Z74": "Singtel",
+    "C6L": "Singapore Airlines",
+    "F34": "Wilmar International",
+    "V03": "Venture Corp",
+    "G13": "Genting Singapore",
+    "C52": "ComfortDelGro",
+    "BS6": "Yangzijiang Shipbuilding",
+    "S58": "SATS",
+    "U14": "UOL Group",
+    "C07": "Jardine Cycle & Carriage",
+    "Y92": "Thai Beverage",
+    # ── US: mega-cap ──
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+    "NVDA": "Nvidia",
+    "META": "Meta",
+    "GOOGL": "Alphabet",
+    "AMZN": "Amazon",
+    "TSLA": "Tesla",
+    # ── US: semiconductors ──
+    "AMD": "AMD",
+    "INTC": "Intel",
+    "QCOM": "Qualcomm",
+    "AVGO": "Broadcom",
+    "MU": "Micron",
+    "TSM": "TSMC",
+    "ARM": "Arm Holdings",
+    "AMAT": "Applied Materials",
+    "LRCX": "Lam Research",
+    # ── US: software / cloud ──
+    "CRM": "Salesforce",
+    "ADBE": "Adobe",
+    "ORCL": "Oracle",
+    "NOW": "ServiceNow",
+    "INTU": "Intuit",
+    "PANW": "Palo Alto Networks",
+    "SNOW": "Snowflake",
+    "PLTR": "Palantir",
+    "DDOG": "Datadog",
+    # ── US: financials ──
+    "JPM": "JPMorgan",
+    "GS": "Goldman Sachs",
+    "MS": "Morgan Stanley",
+    "BAC": "Bank of America",
+    "WFC": "Wells Fargo",
+    "V": "Visa",
+    "MA": "Mastercard",
+    "AXP": "American Express",
+    "COIN": "Coinbase",
+    # ── US: healthcare ──
+    "UNH": "UnitedHealth",
+    "JNJ": "Johnson & Johnson",
+    "LLY": "Eli Lilly",
+    "ABBV": "AbbVie",
+    "MRK": "Merck",
+    "AMGN": "Amgen",
+    "GILD": "Gilead",
+    "REGN": "Regeneron",
+    # ── US: consumer discretionary ──
+    "HD": "Home Depot",
+    "MCD": "McDonald's",
+    "SBUX": "Starbucks",
+    "NKE": "Nike",
+    "LULU": "Lululemon",
+    "CMG": "Chipotle",
+    "COST": "Costco",
+    "TGT": "Target",
+    # ── US: energy ──
+    "XOM": "Exxon Mobil",
+    "CVX": "Chevron",
+    "OXY": "Occidental",
+    "SLB": "SLB",
+    # ── US: industrials ──
+    "CAT": "Caterpillar",
+    "DE": "Deere",
+    "RTX": "RTX",
+    "HON": "Honeywell",
+    "GE": "GE Aerospace",
+    "BA": "Boeing",
+    # ── US: high-IV / momentum ──
+    "SOFI": "SoFi",
+    "F": "Ford",
+    "HOOD": "Robinhood",
+    "RBLX": "Roblox",
+    # ── US: quantum ──
+    "IONQ": "IonQ",
+    "QBTS": "D-Wave Quantum",
+    "RGTI": "Rigetti Computing",
+    "IBM": "IBM",
+    # ── US: index ETFs ──
+    "SPY": "S&P 500 ETF",
+    "QQQ": "Nasdaq 100 ETF",
+    "IWM": "Russell 2000 ETF",
+}
+
 # Real long-term SG holdings (bare SGX codes) — monitored independently of the
 # paper strategy: holdings block in the SGX Pre-Open, intraday big-move alerts,
 # trend-break/overbought warnings, and accumulation hints for adding on dips.
