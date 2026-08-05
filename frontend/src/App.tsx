@@ -13,11 +13,12 @@ import { TradeLog } from './components/TradeLog'
 import { PnLChart } from './components/PnLChart'
 import { OptionsTradeLog } from './components/OptionsTradeLog'
 import { StrategyCompare } from './components/StrategyCompare'
+import { TrackPanel } from './components/TrackPanel'
 import type { MarketRegime, SignalsResponse, OptionsResponse, SpreadOpportunitiesResponse, Trade } from './types'
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000
 
-type Tab = 'dashboard' | 'signals' | 'trades' | 'compare'
+type Tab = 'dashboard' | 'signals' | 'trades' | 'track' | 'compare'
 
 function marketStatus(): { label: string; dot: string } {
   const now = new Date()
@@ -63,6 +64,16 @@ function IconTrades() {
   )
 }
 
+function IconTrack() {
+  return (
+    <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <circle cx="8" cy="8" r="6.5" />
+      <circle cx="8" cy="8" r="2.5" />
+      <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 function IconCompare() {
   return (
     <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -101,6 +112,7 @@ function Sidebar({
     { id: 'dashboard', label: 'Dashboard', icon: <IconGrid /> },
     { id: 'signals',   label: 'Signals',   icon: <IconSignal /> },
     { id: 'trades',    label: 'Trades',    icon: <IconTrades /> },
+    { id: 'track',     label: 'US Track',  icon: <IconTrack /> },
     { id: 'compare',   label: 'A/B Compare', icon: <IconCompare /> },
   ]
 
@@ -171,6 +183,7 @@ function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
     { id: 'dashboard', label: 'Dashboard', icon: <IconGrid /> },
     { id: 'signals',   label: 'Signals',   icon: <IconSignal /> },
     { id: 'trades',    label: 'Trades',    icon: <IconTrades /> },
+    { id: 'track',     label: 'Track',     icon: <IconTrack /> },
     { id: 'compare',   label: 'Compare',   icon: <IconCompare /> },
   ]
 
@@ -345,6 +358,10 @@ export default function App() {
               <OptionsTradeLog />
             </>
           )}
+
+          {/* US Track tab — the auto-logged S$10k pool, separate from Trades
+              above, which is the manually-filled S$5k run */}
+          {tab === 'track' && <TrackPanel />}
 
           {/* Compare tab */}
           {tab === 'compare' && (

@@ -1,4 +1,4 @@
-import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, SpreadOpportunitiesResponse, TradesResponse, WatchlistResponse, OptionsTradesResponse, AlertsResponse, AlertDirection, NewsFeedResponse } from './types'
+import type { MarketRegime, SignalsResponse, PortfolioResponse, OptionsResponse, SpreadOpportunitiesResponse, TradesResponse, WatchlistResponse, OptionsTradesResponse, AlertsResponse, AlertDirection, NewsFeedResponse, TrackResponse } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? ''
 
@@ -104,3 +104,7 @@ export async function deleteAlert(id: number) {
 }
 
 export const fetchNewsFeed = () => get<NewsFeedResponse>('/news-feed')
+
+// Auto-logged S$10k US track. Read-only by design — the track fills itself, so
+// there is no add/close/delete counterpart to the /trades mutations above.
+export const fetchTrack = () => get<TrackResponse>('/track')

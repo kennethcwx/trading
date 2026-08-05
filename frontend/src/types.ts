@@ -301,3 +301,60 @@ export interface NewsFeedResponse {
   items: NewsDigestItem[]
   threshold_pct: number
 }
+
+// ── Auto-logged paper track (S$10k US) ───────────────────────────────────────
+// Separate pool from `Trade` above, which serves the manually-filled S$5k run.
+// The two must never be summed.
+
+export interface PaperTrade {
+  id: number
+  track: string
+  symbol: string
+  variant: string
+  shares: number
+  entry_shares: number
+  entry_date: string
+  entry_price: number
+  stop_loss: number | null
+  profit_target: number | null
+  exit_date: string | null
+  exit_price: number | null
+  exit_reason: string | null
+  half_sold: number
+  peak_price: number | null
+  realized_pnl_usd: number
+  signal_reason: string | null
+}
+
+export interface TrackPosition extends PaperTrade {
+  current: number | null
+  pnl_pct: number | null
+}
+
+export interface TrackStats {
+  n: number
+  wins: number
+  win_rate: number
+  avg_per_trade: number
+  best: number
+  worst: number
+  max_dd: number
+  total_realized_usd: number
+}
+
+export interface TrackResponse {
+  track: string
+  variant: string
+  base_sgd: number
+  start: string
+  enabled: boolean
+  positions: TrackPosition[]
+  closed: PaperTrade[]
+  n_entries: number
+  realized_usd: number
+  unrealized_usd: number
+  stats: TrackStats
+  sgd_to_usd: number
+  min_legs_for_verdict: number
+  expectations: { cagr: number; max_dd: number; per_trade: number }
+}
