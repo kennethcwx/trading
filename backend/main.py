@@ -1389,8 +1389,11 @@ async def _us10k_snapshot() -> dict:
     closed rows would under-report it.
     """
     loop = asyncio.get_event_loop()
-    open_rows = db.get_open_paper_trades(US10K_TRACK)
+    # One query, then split in Python. db.get_conn() opens a fresh Postgres
+    # connection per call and Neon's handshake dominates this endpoint, so
+    # three convenience queries cost far more than the filtering they save.
     all_rows = db.get_all_paper_trades(US10K_TRACK)
+    open_rows = [r for r in all_rows if r.get("exit_price") is None]
     closed_rows = [r for r in all_rows if r.get("exit_price") is not None]
 
     async def _price(sym: str):
@@ -1428,6 +1431,9 @@ async def _us10k_snapshot() -> dict:
         "n_entries": len(all_rows),
         "realized_usd": realized_usd,
         "unrealized_usd": unrealized_usd,
+        # Raw rows for callers that need stats; popped before serialization so
+        # the response doesn't ship every row twice.
+        "_all_rows": all_rows,
     }
 
 
@@ -3276,7 +3282,7 @@ async def get_track():
     """
     loop = asyncio.get_event_loop()
     snap = await _us10k_snapshot()
-    rows = db.get_all_paper_trades(US10K_TRACK)
+    rows = snap.pop("_all_rows")
     # Skip the FX lookup when there is nothing to convert. It costs a network
     # round trip (up to 15s on a cold free-tier backend) and every figure it
     # would scale is zero, so an empty track used to sit on a spinner for no
