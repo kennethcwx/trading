@@ -257,6 +257,65 @@ def init_db():
     """)
     conn.commit()
 
+    # Auto-logged paper tracks (added 2026-08-05). DELIBERATELY SEPARATE from
+    # `trades`: signal_watcher builds its position map from `trades`, so writing
+    # auto-filled rows there would make the S$5k run generate exit alerts for
+    # positions the user never took, and would pollute /portfolio. Keeping this
+    # in its own table is what makes "runs alongside, changes nothing" true.
+    #
+    # `track` scopes every row, so further tracks cost a config entry, not a
+    # migration. Unlike `trades`, a half-sale realizes its P&L into
+    # realized_pnl_usd and halves `shares` — the accounting has to close itself
+    # out without a human, so a flag alone is not enough.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id               SERIAL PRIMARY KEY,
+            track            TEXT NOT NULL,
+            symbol           TEXT NOT NULL,
+            variant          TEXT NOT NULL,
+            shares           REAL NOT NULL,
+            entry_shares     REAL NOT NULL,
+            entry_date       TEXT NOT NULL,
+            entry_price      REAL NOT NULL,
+            stop_loss        REAL,
+            profit_target    REAL,
+            exit_date        TEXT,
+            exit_price       REAL,
+            exit_reason      TEXT,
+            half_sold        INTEGER DEFAULT 0,
+            peak_price       REAL,
+            realized_pnl_usd REAL DEFAULT 0,
+            signal_reason    TEXT,
+            created_at       TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """ if _USE_PG else """
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            track            TEXT NOT NULL,
+            symbol           TEXT NOT NULL,
+            variant          TEXT NOT NULL,
+            shares           REAL NOT NULL,
+            entry_shares     REAL NOT NULL,
+            entry_date       TEXT NOT NULL,
+            entry_price      REAL NOT NULL,
+            stop_loss        REAL,
+            profit_target    REAL,
+            exit_date        TEXT,
+            exit_price       REAL,
+            exit_reason      TEXT,
+            half_sold        INTEGER DEFAULT 0,
+            peak_price       REAL,
+            realized_pnl_usd REAL DEFAULT 0,
+            signal_reason    TEXT,
+            created_at       TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paper_trades_track "
+        "ON paper_trades (track, exit_price)"
+    )
+    conn.commit()
+
     cur.close()
     conn.close()
 
@@ -454,6 +513,99 @@ def clear_fill(fill_id: int) -> None:
 def get_all_sgx_signals() -> list[dict]:
     """Every SGX order alert, filled or not — the /discipline dataset."""
     return fetch("SELECT * FROM sgx_fills ORDER BY id")
+
+
+# ── Auto-logged paper tracks ──────────────────────────────────────────────────
+# Every function here is scoped by `track` and touches only `paper_trades`.
+# Nothing in this section may write to `trades` — that separation is the whole
+# reason a second track can run without disturbing the first.
+
+def open_paper_trade(track: str, symbol: str, variant: str, shares: float,
+                     entry_date: str, entry_price: float,
+                     stop_loss: float | None, profit_target: float | None,
+                     signal_reason: str | None = None) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO paper_trades (track, symbol, variant, shares, entry_shares, "
+        "entry_date, entry_price, stop_loss, profit_target, peak_price, signal_reason) "
+        f"VALUES ({_ph()}, {_ph()}, {_ph()}, {_ph()}, {_ph()}, {_ph()}, {_ph()}, {_ph()}, {_ph()}, {_ph()}, {_ph()})"
+        + (" RETURNING id" if _USE_PG else ""),
+        (track, symbol, variant, shares, shares, entry_date, entry_price,
+         stop_loss, profit_target, entry_price, signal_reason),
+    )
+    new_id = cur.fetchone()["id"] if _USE_PG else cur.lastrowid
+    conn.commit()
+    cur.close()
+    conn.close()
+    return new_id
+
+
+def get_open_paper_trades(track: str) -> list[dict]:
+    return fetch(
+        "SELECT * FROM paper_trades WHERE track=? AND exit_price IS NULL ORDER BY id",
+        (track,),
+    )
+
+
+def get_closed_paper_trades(track: str) -> list[dict]:
+    return fetch(
+        "SELECT * FROM paper_trades WHERE track=? AND exit_price IS NOT NULL "
+        "ORDER BY exit_date, id",
+        (track,),
+    )
+
+
+def get_all_paper_trades(track: str) -> list[dict]:
+    return fetch("SELECT * FROM paper_trades WHERE track=? ORDER BY id", (track,))
+
+
+def get_open_paper_trade(track: str, symbol: str) -> dict | None:
+    return fetchone(
+        "SELECT * FROM paper_trades WHERE track=? AND symbol=? AND exit_price IS NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (track, symbol),
+    )
+
+
+def update_paper_peak(trade_id: int, peak: float) -> None:
+    mutate("UPDATE paper_trades SET peak_price=? WHERE id=?", (peak, trade_id))
+
+
+def sell_half_paper_trade(trade_id: int, price: float) -> float:
+    """Realize half the position and move the stop to breakeven.
+
+    Returns the realized USD P&L on the half sold. Unlike `trades`, which only
+    flags half_sold, this actually books the gain — an auto-logged track has no
+    human to reconcile the remainder later, so the arithmetic has to close out
+    on its own. Idempotent: a row already half-sold is left alone.
+    """
+    row = fetchone("SELECT * FROM paper_trades WHERE id=?", (trade_id,))
+    if not row or row.get("half_sold") or row.get("exit_price") is not None:
+        return 0.0
+    half = row["shares"] / 2
+    realized = (price - row["entry_price"]) * half
+    mutate(
+        "UPDATE paper_trades SET shares=?, half_sold=1, stop_loss=?, "
+        "realized_pnl_usd=COALESCE(realized_pnl_usd, 0) + ? WHERE id=?",
+        (row["shares"] - half, row["entry_price"], realized, trade_id),
+    )
+    return realized
+
+
+def close_paper_trade(trade_id: int, exit_price: float, exit_date: str,
+                      exit_reason: str) -> float:
+    """Close the remaining shares. Returns realized USD P&L on this leg."""
+    row = fetchone("SELECT * FROM paper_trades WHERE id=?", (trade_id,))
+    if not row or row.get("exit_price") is not None:
+        return 0.0
+    realized = (exit_price - row["entry_price"]) * row["shares"]
+    mutate(
+        "UPDATE paper_trades SET exit_price=?, exit_date=?, exit_reason=?, "
+        "realized_pnl_usd=COALESCE(realized_pnl_usd, 0) + ? WHERE id=?",
+        (exit_price, exit_date, exit_reason, realized, trade_id),
+    )
+    return realized
 
 
 # ── News digest ───────────────────────────────────────────────────────────────

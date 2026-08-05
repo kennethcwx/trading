@@ -23,7 +23,7 @@ import telegram_bot
 import news
 from analysis import get_market_regime, get_crypto_regime, get_sgx_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, get_return_since, get_holding_events, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, SGX_HOLDINGS, HOLDINGS_MOVE_ALERT_PCT, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, MAX_SECTOR_PCT, TICKER_SECTORS, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO
+from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, SGX_HOLDINGS, HOLDINGS_MOVE_ALERT_PCT, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, MAX_SECTOR_PCT, TICKER_SECTORS, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO, US10K_ENABLED, US10K_TRACK, US10K_PORTFOLIO_SGD, US10K_VARIANT, US10K_START, US10K_EXPECT_CAGR, US10K_EXPECT_MAXDD, US10K_EXPECT_PER_TRADE
 
 logging.basicConfig(level=logging.INFO)
 
@@ -246,6 +246,148 @@ def _sgx_equity_sgd() -> float:
     except Exception as e:
         logging.warning(f"SGX equity calc failed, using fixed base: {e}")
         return SGX_PORTFOLIO_SGD
+
+
+def _us10k_equity_sgd(sgd_to_usd: float) -> float:
+    """Compounding equity for the auto-logged S$10k US track.
+
+    Same reasoning as _us_equity_sgd: the backtest risks 1% of *current* equity,
+    so sizing off the fixed base would drift from the very numbers /algocheck
+    compares this track against. Reads only paper_trades.
+    """
+    try:
+        rows = db.fetch(
+            "SELECT realized_pnl_usd FROM paper_trades WHERE track = ?", (US10K_TRACK,)
+        )
+        realized_usd = sum(r.get("realized_pnl_usd") or 0 for r in rows)
+        return US10K_PORTFOLIO_SGD + (realized_usd / sgd_to_usd if sgd_to_usd else 0)
+    except Exception as e:
+        logging.warning(f"us10k equity calc failed, using fixed base: {e}")
+        return US10K_PORTFOLIO_SGD
+
+
+def _run_us10k_track(stock_data: list[dict], regime: dict, sgd_to_usd: float,
+                     size_mult: float, rs_rank_map: dict[str, int],
+                     entry_window: bool) -> None:
+    """Auto-fill the S$10k US paper track from strategy D.
+
+    Runs off the batch signal_watcher has already fetched, so it adds no network
+    calls and cannot slow the alert path. Reads and writes ONLY paper_trades —
+    the S$5k run's `trades` rows, its alerts and /portfolio are never touched,
+    which is what lets this run alongside rather than on top.
+
+    Entries confirm in the same close window the alert path uses (backtest
+    parity). Exits are evaluated every pass — a stop that only checks near the
+    close is not a stop.
+
+    Silent by design: this track logs, it does not message. Telegram already
+    carries the A/B/C/D alerts, and a second stream narrating simulated fills
+    would be noise. /track and /algocheck are where it surfaces.
+    """
+    if not US10K_ENABLED:
+        return
+
+    try:
+        open_rows = db.get_open_paper_trades(US10K_TRACK)
+    except Exception as e:
+        logging.warning(f"us10k: cannot read open trades, skipping pass: {e}")
+        return
+
+    position_map = {
+        r["symbol"]: {
+            "avg_cost": r["entry_price"],
+            "shares": r["shares"],
+            "entry_date": r.get("entry_date"),
+            "stop_loss": r.get("stop_loss"),
+            "profit_target": r.get("profit_target"),
+        }
+        for r in open_rows
+    }
+    by_symbol = {r["symbol"]: r for r in open_rows}
+    equity_sgd = _us10k_equity_sgd(sgd_to_usd)
+    today = datetime.now(SGT).strftime("%Y-%m-%d")
+
+    for d in stock_data:
+        symbol = d["symbol"]
+        # crypto has its own watcher and pool; SGX codes aren't US symbols
+        if "-USD" in symbol or symbol in SGX_WATCHLIST:
+            continue
+
+        position = position_map.get(symbol)
+        if position is None and not entry_window:
+            continue
+
+        price = d["analysis"].get("price")
+        if not price or price <= 0:
+            continue
+
+        rs_rank = _screener_rs_ranks.get(symbol, rs_rank_map.get(symbol))
+        sector_ok = d["sector_status"].get("above_200sma") if d["sector_status"] else None
+
+        try:
+            sig = generate_signal(
+                d["analysis"], position, regime, d["fundamentals"], d["rel_strength"],
+                rs_rank=rs_rank, sector_ok=sector_ok, variant=US10K_VARIANT,
+            )
+        except Exception as e:
+            logging.warning(f"us10k: signal failed for {symbol}: {e}")
+            continue
+
+        action = sig["action"]
+
+        # ── Entry ──────────────────────────────────────────────────────────
+        if position is None:
+            if action != "BUY":
+                continue
+            size = calculate_position_size(
+                equity_sgd, price, d["analysis"]["stop_loss"], sgd_to_usd, size_mult,
+            )
+            if not size or size["shares"] <= 0:
+                continue
+            try:
+                db.open_paper_trade(
+                    US10K_TRACK, symbol, US10K_VARIANT, size["shares"], today, price,
+                    d["analysis"].get("stop_loss"), d["analysis"].get("profit_target"),
+                    "; ".join(sig.get("reasons") or [])[:400],
+                )
+                logging.info(
+                    f"us10k: OPEN {symbol} {size['shares']} @ ${price:.2f} "
+                    f"stop ${d['analysis'].get('stop_loss') or 0:.2f}"
+                )
+            except Exception as e:
+                logging.warning(f"us10k: open failed for {symbol}: {e}")
+            continue
+
+        # ── Exits ──────────────────────────────────────────────────────────
+        row = by_symbol[symbol]
+        try:
+            if action == "SELL":
+                db.close_paper_trade(row["id"], price, today,
+                                     (sig.get("suggested_action") or "Exit signal")[:200])
+                logging.info(f"us10k: CLOSE {symbol} @ ${price:.2f}")
+                continue
+
+            if action == "SELL_HALF" and not row.get("half_sold"):
+                db.sell_half_paper_trade(row["id"], price)
+                logging.info(f"us10k: HALF {symbol} @ ${price:.2f}")
+                continue
+
+            # Trailing stop on the half-sold remainder. Deliberately mirrors the
+            # S$5k rule (arms off gain-from-entry, de-arms on retrace) rather
+            # than crypto's persistent trail — US exit logic is frozen until the
+            # 2026-09-01 check-in, and a track that exits differently would not
+            # be measuring the strategy under review.
+            if row.get("half_sold") == 1:
+                prev_peak = row.get("peak_price") or row["entry_price"]
+                peak = max(prev_peak, price)
+                if peak > prev_peak:
+                    db.update_paper_peak(row["id"], peak)
+                gain = (price - row["entry_price"]) / row["entry_price"]
+                if gain >= TRAILING_TRIGGER and price <= peak * (1 - TRAILING_STOP_PCT):
+                    db.close_paper_trade(row["id"], price, today, "Trailing stop")
+                    logging.info(f"us10k: TRAIL CLOSE {symbol} @ ${price:.2f}")
+        except Exception as e:
+            logging.warning(f"us10k: exit handling failed for {symbol}: {e}")
 
 
 def _sector_note(symbol: str, market: str, new_value_sgd: float | None,
@@ -471,6 +613,14 @@ async def signal_watcher():
                 _remember_signal(_last_signals_d, "D", symbol, action_d)
 
                 _remember_signal(_last_signals, "A", symbol, action)
+
+            # Auto-logged S$10k US track. Isolated in its own table and wrapped
+            # so a failure here can never take down the alert path above.
+            try:
+                _run_us10k_track(stock_data, regime, sgd_to_usd, size_mult,
+                                 rs_rank_map, entry_window)
+            except Exception as e:
+                logging.warning(f"us10k track pass failed: {e}")
 
             # Trailing stop check for half-sold positions
             half_sold_trades = db.fetch(
@@ -1231,6 +1381,276 @@ async def _send_portfolio():
     telegram_bot.send("\n".join(lines))
 
 
+async def _us10k_snapshot() -> dict:
+    """Live state of the auto-logged S$10k US track.
+
+    Realized P&L sums realized_pnl_usd across ALL rows, not just closed ones —
+    a half-sold position books its first leg while still open, so filtering to
+    closed rows would under-report it.
+    """
+    loop = asyncio.get_event_loop()
+    open_rows = db.get_open_paper_trades(US10K_TRACK)
+    all_rows = db.get_all_paper_trades(US10K_TRACK)
+    closed_rows = [r for r in all_rows if r.get("exit_price") is not None]
+
+    async def _price(sym: str):
+        try:
+            a = await loop.run_in_executor(None, get_ticker_analysis, sym)
+            return a["price"] if a else None
+        except Exception:
+            return None
+
+    prices: dict[str, float | None] = {}
+    if open_rows:
+        syms = [r["symbol"] for r in open_rows]
+        got = await asyncio.gather(*[_price(s) for s in syms], return_exceptions=True)
+        prices = {s: (p if isinstance(p, (int, float)) else None) for s, p in zip(syms, got)}
+
+    realized_usd = sum((r.get("realized_pnl_usd") or 0) for r in all_rows)
+    unrealized_usd = 0.0
+    positions = []
+    for r in open_rows:
+        cur = prices.get(r["symbol"])
+        pnl_pct = None
+        if cur:
+            unrealized_usd += (cur - r["entry_price"]) * r["shares"]
+            pnl_pct = ((cur - r["entry_price"]) / r["entry_price"]) * 100
+        positions.append({**r, "current": cur, "pnl_pct": pnl_pct})
+
+    return {
+        "track": US10K_TRACK,
+        "variant": US10K_VARIANT,
+        "base_sgd": US10K_PORTFOLIO_SGD,
+        "start": US10K_START,
+        "enabled": US10K_ENABLED,
+        "positions": positions,
+        "closed": closed_rows,
+        "n_entries": len(all_rows),
+        "realized_usd": realized_usd,
+        "unrealized_usd": unrealized_usd,
+    }
+
+
+async def _send_track():
+    loop = asyncio.get_event_loop()
+    snap = await _us10k_snapshot()
+
+    try:
+        regime = await asyncio.wait_for(
+            loop.run_in_executor(None, get_market_regime), timeout=15)
+        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+    except Exception:
+        sgd_to_usd = 0.74
+
+    header = [
+        f"🇺🇸 <b>US Track · S${snap['base_sgd']:,}</b>",
+        f"<code>Strategy D · auto-logged · since {snap['start']}</code>",
+        "",
+    ]
+
+    if not snap["n_entries"]:
+        telegram_bot.send("\n".join(header + [
+            "No entries yet.",
+            "",
+            "This track fills itself — the next strategy D BUY in the "
+            "03:30–04:00 SGT close window opens the first position. "
+            "Nothing for you to log.",
+        ]))
+        return
+
+    lines = list(header)
+    positions = snap["positions"]
+    if positions:
+        lines.append(f"📋 <b>Open ({len(positions)})</b>")
+        rows = []
+        for p in positions:
+            half = " ·½" if p.get("half_sold") else ""
+            if p["current"] is not None:
+                sign = "+" if p["pnl_pct"] >= 0 else ""
+                rows.append(f"{p['symbol']:<6}{p['shares']:>7.2f}sh  in ${p['entry_price']:.2f}"
+                            f"  now ${p['current']:.2f}  {sign}{p['pnl_pct']:.1f}%{half}")
+            else:
+                rows.append(f"{p['symbol']:<6}{p['shares']:>7.2f}sh  in ${p['entry_price']:.2f}"
+                            f"  (no live price){half}")
+        lines.append("<code>" + "\n".join(rows) + "</code>")
+    else:
+        lines.append("📋 <b>Open</b>  none")
+
+    realized = snap["realized_usd"]
+    unreal = snap["unrealized_usd"]
+    total = realized + unreal
+    base_usd = snap["base_sgd"] * sgd_to_usd
+    ret_pct = (total / base_usd * 100) if base_usd else 0
+    equity_sgd = snap["base_sgd"] + (total / sgd_to_usd if sgd_to_usd else 0)
+
+    def _m(v: float) -> str:
+        return f"{'+' if v >= 0 else '-'}${abs(v):,.2f}"
+
+    lines += ["", "💰 <b>P&L</b>", "<code>"
+              f"Realized    {_m(realized)}\n"
+              f"Unrealized  {_m(unreal)}\n"
+              f"Total       {_m(total)}  ({'+' if ret_pct >= 0 else ''}{ret_pct:.2f}%)\n"
+              f"Equity      S${equity_sgd:,.0f}"
+              "</code>"]
+
+    lines += ["", f"📈 {snap['n_entries']} entries · {len(snap['closed'])} closed "
+                  f"· {len(positions)} open"]
+    lines.append("<code>/algocheck for the verdict vs backtest</code>")
+    telegram_bot.send("\n".join(lines))
+
+
+def _us10k_stats(rows: list[dict], base_usd: float) -> dict:
+    """Realized performance of the track. Only exited rows count — an open
+    position's mark-to-market is a quote, not a result."""
+    closed = [r for r in rows if r.get("exit_price") is not None]
+    legs = []
+    for r in closed:
+        basis = r["entry_price"] * (r.get("entry_shares") or r["shares"])
+        if basis > 0:
+            legs.append((r.get("realized_pnl_usd") or 0) / basis)
+
+    n = len(legs)
+    wins = sum(1 for x in legs if x > 0)
+    avg = sum(legs) / n if n else 0.0
+
+    # Realized-only equity curve, ordered by exit. Excursions on positions that
+    # are still open are invisible to it, so this is a FLOOR on drawdown, not
+    # the true figure — the report labels it that way rather than implying a
+    # precision the data doesn't have.
+    equity = peak = base_usd
+    maxdd = 0.0
+    for r in sorted(closed, key=lambda x: (x.get("exit_date") or "", x["id"])):
+        equity += r.get("realized_pnl_usd") or 0
+        peak = max(peak, equity)
+        if peak > 0:
+            maxdd = min(maxdd, (equity - peak) / peak)
+
+    return {
+        "n": n,
+        "wins": wins,
+        "win_rate": wins / n if n else 0.0,
+        "avg_per_trade": avg,
+        "best": max(legs) if legs else 0.0,
+        "worst": min(legs) if legs else 0.0,
+        "max_dd": maxdd,
+        "total_realized_usd": sum(r.get("realized_pnl_usd") or 0 for r in rows),
+    }
+
+
+# Below this many closed legs the sample cannot separate skill from noise, so
+# /algocheck reports numbers without a verdict. Chosen to match the robustness
+# work: strategy D's walk-forward evidence rests on 283 legs across 8 windows,
+# and its own out-of-sample window ran -0.41%/trade in a soft regime. Calling a
+# strategy broken off a handful of trades would contradict that finding.
+US10K_MIN_LEGS_FOR_VERDICT = 20
+
+
+async def _send_algocheck():
+    """Compare the auto-logged track against strategy D's backtest expectations."""
+    loop = asyncio.get_event_loop()
+    try:
+        rows = db.get_all_paper_trades(US10K_TRACK)
+    except Exception as e:
+        telegram_bot.send(f"❌ /algocheck failed reading the track.\n<code>{e}</code>")
+        return
+
+    try:
+        regime = await asyncio.wait_for(
+            loop.run_in_executor(None, get_market_regime), timeout=15)
+        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+    except Exception:
+        sgd_to_usd = 0.74
+
+    base_usd = US10K_PORTFOLIO_SGD * sgd_to_usd
+    st = _us10k_stats(rows, base_usd)
+    days = (datetime.now(SGT).date()
+            - datetime.strptime(US10K_START, "%Y-%m-%d").date()).days
+
+    head = [
+        "🔬 <b>Algo Check · US Track</b>",
+        f"<code>Strategy D · day {days} · {len(rows)} entries, {st['n']} closed</code>",
+        "",
+    ]
+
+    if not rows:
+        telegram_bot.send("\n".join(head + [
+            "Nothing logged yet — the track opens its first position on the "
+            "next strategy D BUY in the 03:30–04:00 SGT close window.",
+        ]))
+        return
+
+    if st["n"] == 0:
+        telegram_bot.send("\n".join(head + [
+            f"{len(rows)} position(s) open, none closed yet.",
+            "",
+            "No verdict is possible until trades exit — an open position's P&L "
+            "is a quote, not a result. <code>/track</code> shows the marks.",
+        ]))
+        return
+
+    try:
+        spy = await asyncio.wait_for(
+            loop.run_in_executor(None, get_return_since, "SPY", US10K_START), timeout=20)
+    except Exception:
+        spy = None
+
+    exp_leg = US10K_EXPECT_PER_TRADE
+    lines = list(head)
+    lines.append("📊 <b>Realized vs backtest</b>")
+    # Only rows with a genuine backtest counterpart belong under "expected" —
+    # win rate and best/worst have none, and putting them in that column would
+    # read as targets the strategy was supposed to hit.
+    rowsf = [
+        f"{'':<12}{'actual':>10}{'expected':>11}",
+        f"{'Per trade':<12}{st['avg_per_trade']*100:>9.2f}%{exp_leg*100:>10.2f}%",
+        f"{'Max DD':<12}{st['max_dd']*100:>9.1f}%{US10K_EXPECT_MAXDD*100:>10.1f}%",
+    ]
+    lines.append("<code>" + "\n".join(rowsf) + "</code>")
+    lines.append(
+        f"<code>Win rate {st['win_rate']*100:.0f}% ({st['wins']}/{st['n']}) · "
+        f"best {st['best']*100:+.1f}% · worst {st['worst']*100:+.1f}%</code>"
+    )
+
+    total_ret = st["total_realized_usd"] / base_usd if base_usd else 0
+    bench = [f"{'Track':<8}{total_ret*100:>+8.2f}%"]
+    if spy is not None:
+        bench.append(f"{'SPY':<8}{spy:>+8.2f}%")
+        bench.append(f"{'Edge':<8}{(total_ret*100 - spy):>+8.2f}%")
+    lines += ["", "📈 <b>Realized return since start</b>",
+              "<code>" + "\n".join(bench) + "</code>"]
+
+    lines.append("")
+    if st["n"] < US10K_MIN_LEGS_FOR_VERDICT:
+        lines += [
+            f"⏳ <b>No verdict — {st['n']}/{US10K_MIN_LEGS_FOR_VERDICT} legs</b>",
+            f"Too few trades to tell skill from noise. D's own walk-forward "
+            f"evidence rests on 283 legs, and one of its out-of-sample windows "
+            f"ran −0.41%/trade in a soft regime. A weak reading here is not yet "
+            f"a failing strategy.",
+        ]
+    else:
+        gap = st["avg_per_trade"] - exp_leg
+        if st["avg_per_trade"] <= 0:
+            verdict = ("🔴 <b>Underperforming</b>",
+                       f"Losing {abs(st['avg_per_trade'])*100:.2f}% per trade against "
+                       f"a backtest that made {exp_leg*100:.2f}%. Worth a look at "
+                       f"whether live entries match the backtest's fills.")
+        elif gap < -exp_leg / 2:
+            verdict = ("🟡 <b>Below backtest</b>",
+                       f"Positive but {abs(gap)*100:.2f}pp/trade short of expectation. "
+                       f"Costs and slippage are the usual cause — <code>/slippage</code> "
+                       f"measures that directly.")
+        else:
+            verdict = ("🟢 <b>Tracking backtest</b>",
+                       f"Live per-trade return is within half the expected edge. "
+                       f"Drawdown floor {st['max_dd']*100:.1f}% vs {US10K_EXPECT_MAXDD*100:.1f}% expected.")
+        lines += [verdict[0], verdict[1]]
+
+    lines += ["", "<code>Max DD is realized-only — a floor, not the true "
+                  "figure. Open-position excursions aren't counted.</code>"]
+    telegram_bot.send("\n".join(lines))
+
+
 async def _undo_last_fill():
     """Revert the most recent /fill — clears the slippage record and unwinds the
     trade bookkeeping it created, so the alert can be re-reported correctly."""
@@ -1436,6 +1856,9 @@ async def handle_telegram_command(text: str):
             "/slippage — SGX signal-vs-fill slippage report\n"
             "/discipline — alerts acted on vs missed\n"
             "/benchmark — validation P&L vs SPY since 2026-07-13\n\n"
+            "<b>US track · S$10k, auto-logged</b>\n"
+            "/track — positions, entries and P&L (fills itself, nothing to log)\n"
+            "/algocheck — is the algo actually working? vs backtest\n\n"
             "<b>Signals</b>\n"
             "/crypto — current signal for BTC, ETH, SOL\n"
             "/signal AAPL — current signal for any ticker\n"
@@ -1634,6 +2057,22 @@ async def handle_telegram_command(text: str):
         except Exception as e:
             logging.warning(f"/benchmark error: {e}")
             telegram_bot.send(f"❌ Benchmark failed.\n<code>{e}</code>")
+
+    elif cmd == "/track":
+        telegram_bot.send("⏳ Fetching the US track…")
+        try:
+            await _send_track()
+        except Exception as e:
+            logging.warning(f"/track error: {e}")
+            telegram_bot.send(f"❌ Track fetch failed.\n<code>{e}</code>")
+
+    elif cmd == "/algocheck":
+        telegram_bot.send("⏳ Checking the algo against backtest…")
+        try:
+            await _send_algocheck()
+        except Exception as e:
+            logging.warning(f"/algocheck error: {e}")
+            telegram_bot.send(f"❌ Algo check failed.\n<code>{e}</code>")
 
     elif cmd == "/health":
         await _send_health()
@@ -2102,6 +2541,32 @@ async def daily_summary_task(market: str, hour: int, minute: int, skip_weekdays:
             await asyncio.sleep(60)
 
 
+async def weekly_algocheck_task(weekday: int = 5, hour: int = 9, minute: int = 0):
+    """Push the algo verdict weekly — Saturday 09:00 SGT, after Friday's US
+    session has closed and settled.
+
+    This is the part that makes the track agentic rather than another dashboard
+    to remember to open: the question "is this working" gets answered on a
+    schedule instead of waiting to be asked. The manual-input version of this
+    loop logged nothing for three weeks.
+    """
+    await asyncio.sleep(90)
+    while True:
+        try:
+            now = datetime.now(SGT)
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            while target.weekday() != weekday:
+                target += timedelta(days=1)
+            await asyncio.sleep((target - datetime.now(SGT)).total_seconds())
+            if US10K_ENABLED:
+                await _send_algocheck()
+        except Exception as e:
+            logging.warning(f"weekly algocheck error: {e}")
+            await asyncio.sleep(300)
+
+
 async def morning_briefing_task():
     # Catch-up: if the backend starts after 8:30 AM on a weekday and before
     # market close (4 PM ET), the briefing was missed — send it now.
@@ -2175,6 +2640,8 @@ async def lifespan(app: FastAPI):
     # SGX at 17:45 SGT Mon–Fri (Sat=5, Sun=6 skipped)
     us_summary = asyncio.create_task(daily_summary_task("US", 7, 30, (6, 0)))
     sgx_summary = asyncio.create_task(daily_summary_task("SGX", 17, 45, (5, 6)))
+    # Weekly algo verdict: Saturday 09:00 SGT, after Friday's US close settles
+    algocheck = asyncio.create_task(weekly_algocheck_task())
     telegram_bot.set_bot_commands()
     telegram_bot.send(telegram_bot.format_startup(db.get_watchlist()))
     yield
@@ -2186,6 +2653,7 @@ async def lifespan(app: FastAPI):
     briefing.cancel()
     us_summary.cancel()
     sgx_summary.cancel()
+    algocheck.cancel()
 
 
 def _sanitize_nan(obj):
@@ -2790,6 +3258,36 @@ async def options_opportunities():
         "regime": regime,
         "portfolio_size_sgd": PORTFOLIO_SIZE_SGD,
         "note": "Verify IVR > 30 on Market Chameleon or ThinkorSwim before any options trade",
+    }
+
+
+@app.get("/api/track")
+async def get_track():
+    """Auto-logged US paper track: positions, closed legs and realized stats.
+
+    Deliberately separate from /api/trades, which serves the manually-filled
+    S$5k run — the two are different pools and must never be summed.
+    """
+    loop = asyncio.get_event_loop()
+    snap = await _us10k_snapshot()
+    try:
+        regime = await asyncio.wait_for(
+            loop.run_in_executor(None, get_market_regime), timeout=15)
+        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+    except Exception:
+        sgd_to_usd = 0.74
+    base_usd = US10K_PORTFOLIO_SGD * sgd_to_usd
+    stats = _us10k_stats(db.get_all_paper_trades(US10K_TRACK), base_usd)
+    return {
+        **snap,
+        "stats": stats,
+        "sgd_to_usd": sgd_to_usd,
+        "min_legs_for_verdict": US10K_MIN_LEGS_FOR_VERDICT,
+        "expectations": {
+            "cagr": US10K_EXPECT_CAGR,
+            "max_dd": US10K_EXPECT_MAXDD,
+            "per_trade": US10K_EXPECT_PER_TRADE,
+        },
     }
 
 

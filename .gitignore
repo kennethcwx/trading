@@ -20,3 +20,7 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 research/
+
+# Agent tooling
+.agents/
+skills-lock.json

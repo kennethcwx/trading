@@ -534,6 +534,8 @@ def set_bot_commands() -> bool:
         {"command": "slippage",   "description": "SGX signal-vs-fill slippage report"},
         {"command": "discipline", "description": "Alerts acted on vs missed (validation criterion)"},
         {"command": "benchmark",  "description": "Validation P&L vs SPY since 2026-07-13"},
+        {"command": "track",      "description": "US S$10k auto-logged track — positions, entries, P&L"},
+        {"command": "algocheck",  "description": "Is the algo working? live results vs backtest"},
         {"command": "health",     "description": "Backend commit, watcher heartbeats, market regime"},
         {"command": "crypto",     "description": "Current signal for BTC, ETH, SOL"},
         {"command": "signal",     "description": "Signal for any ticker — /signal AAPL"},

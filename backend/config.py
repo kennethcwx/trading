@@ -113,6 +113,30 @@ SGX_WATCHLIST = [
 ]
 SGX_PORTFOLIO_SGD = 5000     # paper capital allocation for SGX (cash-only, no margin)
 
+# ── Auto-logged US paper track, S$10k (added 2026-08-05) ───────────────────
+# A second paper track that fills itself. Separate from the S$5k run in every
+# way that matters: its own capital, its own `paper_trades` rows, its own
+# position map. Nothing here writes to `trades`, so /portfolio, /benchmark,
+# the A/B/C/D alert path and the shadow run started 2026-07-13 are untouched.
+#
+# Why it exists: the manual /fill workflow logged ZERO trades in the first
+# three weeks of the shadow run, so every downstream report was reading an
+# empty table. This track removes the human step from the measurement path.
+# /fill still runs, and now serves its real purpose — measuring how far a
+# genuine moomoo fill lands from the simulated one.
+US10K_ENABLED = True
+US10K_TRACK = "us10k"
+US10K_PORTFOLIO_SGD = 10000
+US10K_VARIANT = "SWING_LOW_NOCAP"   # strategy D — the walk-forward winner
+US10K_START = "2026-08-05"
+
+# Backtest expectations for D, used by /algocheck as the comparison baseline.
+# Source: research/ walk-forward reports, 2026-07-19 (corrected engine, real
+# costs). Pooled per-trade figure is the most robust of the three at low N.
+US10K_EXPECT_CAGR = 0.079        # +7.9% CAGR
+US10K_EXPECT_MAXDD = -0.076      # -7.6% max drawdown
+US10K_EXPECT_PER_TRADE = 0.0196  # +1.96% per trade, pooled over 283 legs
+
 # Sector membership for the MAX_SECTOR_PCT concentration check on BUY alerts.
 # Static for the same reason as TICKER_NAMES: no network call on the alert path.
 # (analysis.get_sector_etf_status hits yfinance for the sector *trend* filter —
