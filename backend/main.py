@@ -1435,19 +1435,14 @@ async def _send_track():
     loop = asyncio.get_event_loop()
     snap = await _us10k_snapshot()
 
-    try:
-        regime = await asyncio.wait_for(
-            loop.run_in_executor(None, get_market_regime), timeout=15)
-        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
-    except Exception:
-        sgd_to_usd = 0.74
-
     header = [
         f"🇺🇸 <b>US Track · S${snap['base_sgd']:,}</b>",
         f"<code>Strategy D · auto-logged · since {snap['start']}</code>",
         "",
     ]
 
+    # Answer the empty case before paying for an FX lookup that would only
+    # scale zeros.
     if not snap["n_entries"]:
         telegram_bot.send("\n".join(header + [
             "No entries yet.",
@@ -1457,6 +1452,13 @@ async def _send_track():
             "Nothing for you to log.",
         ]))
         return
+
+    try:
+        regime = await asyncio.wait_for(
+            loop.run_in_executor(None, get_market_regime), timeout=15)
+        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+    except Exception:
+        sgd_to_usd = 0.74
 
     lines = list(header)
     positions = snap["positions"]
@@ -1554,6 +1556,34 @@ async def _send_algocheck():
         telegram_bot.send(f"❌ /algocheck failed reading the track.\n<code>{e}</code>")
         return
 
+    n_closed = sum(1 for r in rows if r.get("exit_price") is not None)
+    days = (datetime.now(SGT).date()
+            - datetime.strptime(US10K_START, "%Y-%m-%d").date()).days
+
+    head = [
+        "🔬 <b>Algo Check · US Track</b>",
+        f"<code>Strategy D · day {days} · {len(rows)} entries, {n_closed} closed</code>",
+        "",
+    ]
+
+    # Both early exits below are answerable without an FX rate, so the lookup
+    # waits until there is something to convert.
+    if not rows:
+        telegram_bot.send("\n".join(head + [
+            "Nothing logged yet — the track opens its first position on the "
+            "next strategy D BUY in the 03:30–04:00 SGT close window.",
+        ]))
+        return
+
+    if n_closed == 0:
+        telegram_bot.send("\n".join(head + [
+            f"{len(rows)} position(s) open, none closed yet.",
+            "",
+            "No verdict is possible until trades exit — an open position's P&L "
+            "is a quote, not a result. <code>/track</code> shows the marks.",
+        ]))
+        return
+
     try:
         regime = await asyncio.wait_for(
             loop.run_in_executor(None, get_market_regime), timeout=15)
@@ -1563,30 +1593,6 @@ async def _send_algocheck():
 
     base_usd = US10K_PORTFOLIO_SGD * sgd_to_usd
     st = _us10k_stats(rows, base_usd)
-    days = (datetime.now(SGT).date()
-            - datetime.strptime(US10K_START, "%Y-%m-%d").date()).days
-
-    head = [
-        "🔬 <b>Algo Check · US Track</b>",
-        f"<code>Strategy D · day {days} · {len(rows)} entries, {st['n']} closed</code>",
-        "",
-    ]
-
-    if not rows:
-        telegram_bot.send("\n".join(head + [
-            "Nothing logged yet — the track opens its first position on the "
-            "next strategy D BUY in the 03:30–04:00 SGT close window.",
-        ]))
-        return
-
-    if st["n"] == 0:
-        telegram_bot.send("\n".join(head + [
-            f"{len(rows)} position(s) open, none closed yet.",
-            "",
-            "No verdict is possible until trades exit — an open position's P&L "
-            "is a quote, not a result. <code>/track</code> shows the marks.",
-        ]))
-        return
 
     try:
         spy = await asyncio.wait_for(
@@ -3270,14 +3276,21 @@ async def get_track():
     """
     loop = asyncio.get_event_loop()
     snap = await _us10k_snapshot()
-    try:
-        regime = await asyncio.wait_for(
-            loop.run_in_executor(None, get_market_regime), timeout=15)
-        sgd_to_usd = regime.get("sgd_to_usd", 0.74)
-    except Exception:
-        sgd_to_usd = 0.74
+    rows = db.get_all_paper_trades(US10K_TRACK)
+    # Skip the FX lookup when there is nothing to convert. It costs a network
+    # round trip (up to 15s on a cold free-tier backend) and every figure it
+    # would scale is zero, so an empty track used to sit on a spinner for no
+    # reason at all.
+    sgd_to_usd = 0.74
+    if rows:
+        try:
+            regime = await asyncio.wait_for(
+                loop.run_in_executor(None, get_market_regime), timeout=15)
+            sgd_to_usd = regime.get("sgd_to_usd", 0.74)
+        except Exception:
+            pass
     base_usd = US10K_PORTFOLIO_SGD * sgd_to_usd
-    stats = _us10k_stats(db.get_all_paper_trades(US10K_TRACK), base_usd)
+    stats = _us10k_stats(rows, base_usd)
     return {
         **snap,
         "stats": stats,
