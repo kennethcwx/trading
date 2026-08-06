@@ -3273,6 +3273,73 @@ async def options_opportunities():
     }
 
 
+@app.get("/api/sgx-fills")
+async def get_sgx_fills():
+    """Every SGX order alert, reported or not — the signal-vs-fill record.
+
+    Exists because `sgx_fills` was previously reachable only through /slippage
+    and /discipline on Telegram, so "no trades logged" could not be told apart
+    from "no alerts ever fired" without the user's phone. `n_pending > 0` means
+    alerts fired and went unanswered (a workflow gap); `total == 0` means no SGX
+    order alert has ever fired (look at the signal path, not the user).
+
+    Deliberately does one query and no price lookups, so it answers fast on a
+    cold free-tier backend.
+    """
+    rows = [dict(r) for r in db.get_all_sgx_signals()]
+
+    now = datetime.now(SGT)
+    reported, fresh, missed = [], [], []
+    for r in rows:
+        if r.get("fill_ts"):
+            reported.append(r)
+            continue
+        # Alerts under a day old are still actionable, so they are not yet
+        # evidence of a missed reply — same split /discipline uses.
+        try:
+            age = now - datetime.fromisoformat(r["signal_ts"])
+        except (ValueError, TypeError):
+            age = timedelta(days=99)
+        (fresh if age <= timedelta(days=1) else missed).append(r)
+
+    slips = [r["slippage_pct"] for r in reported if r.get("slippage_pct") is not None]
+    stats = None
+    if slips:
+        mean_slip = sum(slips) / len(slips)
+        stats = {
+            "n": len(slips),
+            "mean_pct": round(mean_slip, 3),
+            "median_pct": round(_median(slips), 3),
+            "worst_pct": round(max(slips), 3),
+            "threshold_pct": 0.2,
+            "verdict": _slippage_verdict(mean_slip, len(slips)),
+        }
+
+    if not rows:
+        diagnosis = ("No SGX order alert has ever been recorded. The empty trades "
+                     "table is not a missed-reply problem — nothing ever asked for a /fill.")
+    elif missed:
+        diagnosis = (f"{len(missed)} alert(s) older than a day are still awaiting /fill. "
+                     "The signal path works; the gap is in reporting fills.")
+    elif fresh and not reported:
+        diagnosis = (f"{len(fresh)} alert(s) fired within the last day and are still "
+                     "actionable. Nothing is wrong yet.")
+    else:
+        diagnosis = f"{len(reported)} of {len(rows)} alert(s) reported."
+
+    return {
+        "total": len(rows),
+        "n_reported": len(reported),
+        "n_pending": len(fresh) + len(missed),
+        "n_missed": len(missed),
+        "n_fresh": len(fresh),
+        "diagnosis": diagnosis,
+        "stats": stats,
+        "reported": reported,
+        "pending": missed + fresh,
+    }
+
+
 @app.get("/api/track")
 async def get_track():
     """Auto-logged US paper track: positions, closed legs and realized stats.
