@@ -257,6 +257,57 @@ def init_db():
     """)
     conn.commit()
 
+    # Fundamentals-gate counterfactual (added 2026-08-06). backtest.py skips the
+    # fundamentals layer deliberately — yfinance serves only *current*
+    # fundamentals, so backtesting the gate would inject lookahead — but the live
+    # track applies it as a hard, purely subtractive gate. The deployed strategy
+    # is therefore strictly narrower than the one the +7.9% expectation came
+    # from, by an unmeasured amount in an unknown direction. This records every
+    # technically-valid breakout the gate suppressed, so the 2026-09-01 review can
+    # price them forward and find out whether the gate earns its place.
+    #
+    # Write-only as far as the scan is concerned: nothing reads this to make a
+    # decision, so it cannot alter live behaviour during the validation freeze.
+    # UNIQUE(date, symbol, variant) collapses a repeating scan to one row a day.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS gated_signals (
+            id            SERIAL PRIMARY KEY,
+            date          TEXT NOT NULL,
+            symbol        TEXT NOT NULL,
+            variant       TEXT NOT NULL,
+            gate          TEXT NOT NULL,
+            would_be      TEXT NOT NULL,
+            got           TEXT NOT NULL,
+            price         REAL NOT NULL,
+            stop_loss     REAL,
+            profit_target REAL,
+            grade         TEXT,
+            score         REAL,
+            signal_ts     TEXT NOT NULL,
+            created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (date, symbol, variant)
+        )
+    """ if _USE_PG else """
+        CREATE TABLE IF NOT EXISTS gated_signals (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            date          TEXT NOT NULL,
+            symbol        TEXT NOT NULL,
+            variant       TEXT NOT NULL,
+            gate          TEXT NOT NULL,
+            would_be      TEXT NOT NULL,
+            got           TEXT NOT NULL,
+            price         REAL NOT NULL,
+            stop_loss     REAL,
+            profit_target REAL,
+            grade         TEXT,
+            score         REAL,
+            signal_ts     TEXT NOT NULL,
+            created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (date, symbol, variant)
+        )
+    """)
+    conn.commit()
+
     # Auto-logged paper tracks (added 2026-08-05). DELIBERATELY SEPARATE from
     # `trades`: signal_watcher builds its position map from `trades`, so writing
     # auto-filled rows there would make the S$5k run generate exit alerts for
@@ -499,6 +550,28 @@ def get_pending_fills() -> list[dict]:
     return fetch(
         "SELECT * FROM sgx_fills WHERE fill_price IS NULL ORDER BY id"
     )
+
+
+# ── Fundamentals-gate counterfactual ──────────────────────────────────────────
+
+def log_gated_signal(date: str, symbol: str, variant: str, gate: str, would_be: str,
+                     got: str, price: float, stop_loss: float | None,
+                     profit_target: float | None, grade: str | None,
+                     score: float | None, signal_ts: str) -> None:
+    """Record a breakout the fundamentals gate suppressed. Silently idempotent:
+    the scan repeats through the day and only the first sighting is kept."""
+    mutate(
+        "INSERT INTO gated_signals (date, symbol, variant, gate, would_be, got, price, "
+        "stop_loss, profit_target, grade, score, signal_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (date, symbol, variant) DO NOTHING",
+        (date, symbol, variant, gate, would_be, got, price, stop_loss,
+         profit_target, grade, score, signal_ts),
+    )
+
+
+def get_gated_signals() -> list[dict]:
+    return fetch("SELECT * FROM gated_signals ORDER BY date, symbol")
 
 
 def get_last_recorded_fill() -> dict | None:

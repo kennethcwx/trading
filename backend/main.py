@@ -354,6 +354,24 @@ def _run_us10k_track(stock_data: list[dict], regime: dict, sgd_to_usd: float,
         # ── Entry ──────────────────────────────────────────────────────────
         if position is None:
             if action != "BUY":
+                # Counterfactual: the technical layer triggered and only the
+                # fundamentals gate stopped the entry, so this is a trade
+                # backtest.py counted and the live track will not take. Logging
+                # it is the only way to learn what the gate costs or saves —
+                # it cannot be backtested (current-only fundamentals). Wrapped
+                # because a logging failure must never break the entry scan.
+                gated = sig.get("gated")
+                if gated:
+                    try:
+                        db.log_gated_signal(
+                            today, symbol, US10K_VARIANT, gated["gate"],
+                            gated["would_be"], action, gated["price"],
+                            gated.get("stop_loss"), gated.get("profit_target"),
+                            gated.get("grade"), gated.get("score"),
+                            datetime.now(SGT).isoformat(timespec="seconds"),
+                        )
+                    except Exception as e:
+                        logging.warning(f"us10k: gated-signal log failed for {symbol}: {e}")
                 continue
             size = calculate_position_size(
                 equity_sgd, price, d["analysis"]["stop_loss"], sgd_to_usd, size_mult,
@@ -3346,6 +3364,38 @@ async def options_opportunities():
         "regime": regime,
         "portfolio_size_sgd": PORTFOLIO_SIZE_SGD,
         "note": "Verify IVR > 30 on Market Chameleon or ThinkorSwim before any options trade",
+    }
+
+
+@app.get("/api/gated-signals")
+async def get_gated_signals():
+    """Breakouts the fundamentals gate suppressed — the counterfactual log.
+
+    Deliberately does NOT price them forward: that needs a history fetch per
+    symbol, which is slow on the free tier and belongs in the 09-01 research
+    pass (research/), not in a live endpoint. This is the raw record plus
+    enough shape to see whether the gate is firing at all.
+    """
+    rows = [dict(r) for r in db.get_gated_signals()]
+
+    by_symbol: dict[str, int] = {}
+    by_grade: dict[str, int] = {}
+    for r in rows:
+        by_symbol[r["symbol"]] = by_symbol.get(r["symbol"], 0) + 1
+        g = r.get("grade") or "?"
+        by_grade[g] = by_grade.get(g, 0) + 1
+
+    return {
+        "total": len(rows),
+        "first_date": rows[0]["date"] if rows else None,
+        "last_date": rows[-1]["date"] if rows else None,
+        "by_symbol": dict(sorted(by_symbol.items(), key=lambda kv: -kv[1])),
+        "by_grade": dict(sorted(by_grade.items())),
+        "note": ("Trades the technical layer triggered and the fundamentals gate "
+                 "suppressed. backtest.py's +7.9% expectation excludes this gate, "
+                 "so these are the difference between the tested and deployed "
+                 "strategies. Price them forward at the 2026-09-01 review."),
+        "signals": rows,
     }
 
 

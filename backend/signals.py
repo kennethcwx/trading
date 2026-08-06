@@ -170,18 +170,28 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
                 if rs_3m is not None and rs_3m < -10:
                     rs_flag = f" · underperforming SPY by {abs(rs_3m):.0f}% over 3m"
 
+            # Both branches below are reached only after the technical layer has
+            # already triggered, so they are precisely the trades backtest.py
+            # counted and the live system does not take. Tag them (presentation
+            # only — no caller branches on `gated`) so the scan can log the
+            # counterfactual and 09-01 can price the gate.
+            gated = {"gate": "fundamentals", "would_be": "BUY",
+                     "grade": grade, "score": score,
+                     "price": price, "stop_loss": stop, "profit_target": target}
+
             if score <= 1:
                 return _signal("SKIP", "LOW",
                                [f"Tech setup OK but fundamentals weak (grade {grade}){rs_flag}",
                                 *bad[:2]],
-                               "Avoid — fix your fundamentals filter or skip this name")
+                               "Avoid — fix your fundamentals filter or skip this name",
+                               gated=gated)
 
             if score == 2:
                 return _signal("WATCH", "MEDIUM",
                                [f"Tech triggered, fundamentals mixed (grade {grade}){rs_flag}",
                                 *tech_reasons, *bad[:1]],
                                "Possible entry at reduced size — verify fundamentals first",
-                               watch_kind="blocked")
+                               watch_kind="blocked", gated=gated)
 
             # Grade B (3) or A (4-5)
             all_reasons = tech_reasons + [f"Fundamentals grade {grade}: {', '.join(good[:2])}"]
@@ -265,7 +275,8 @@ def calculate_position_size(portfolio_sgd: float, price_usd: float,
 
 
 def _signal(action: str, priority: str, reasons: list[str], suggested: str,
-            trade_type: str | None = None, watch_kind: str | None = None) -> dict:
+            trade_type: str | None = None, watch_kind: str | None = None,
+            gated: dict | None = None) -> dict:
     result = {
         "action": action,
         "priority": priority,
@@ -279,4 +290,8 @@ def _signal(action: str, priority: str, reasons: list[str], suggested: str,
     # Presentation only — lets the briefings split the Watch list into two groups.
     if watch_kind:
         result["watch_kind"] = watch_kind
+    # Set only when a filter suppressed an otherwise-valid entry. Carries what
+    # the trade would have been, for counterfactual logging. Nothing acts on it.
+    if gated:
+        result["gated"] = gated
     return result
