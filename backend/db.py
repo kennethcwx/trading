@@ -494,6 +494,13 @@ def get_recorded_fills() -> list[dict]:
     )
 
 
+def get_pending_fills() -> list[dict]:
+    """Every alert still awaiting /fill, oldest first — what the briefing chases."""
+    return fetch(
+        "SELECT * FROM sgx_fills WHERE fill_price IS NULL ORDER BY id"
+    )
+
+
 def get_last_recorded_fill() -> dict | None:
     """Most recently reported fill — what /undo reverts."""
     return fetchone(

@@ -47,6 +47,22 @@ def _log_event(market: str, text: str, sent: bool):
         del _event_log[: len(_event_log) - 200]
 
 
+# telegram_bot.send() swallows its own exceptions and returns False, and no
+# caller used to check that — so a message that never reached the phone was
+# indistinguishable from a delivered one. It does log the failure, but Render's
+# logs aren't reachable from a phone, which is where the daily check happens.
+# Surfaced in /health instead. In-memory by design: /health must do zero work.
+_send_failures: list[dict] = []
+
+
+def _note_send_failure(market: str, what: str) -> None:
+    _send_failures.append({"ts": datetime.now(SGT).isoformat(timespec="seconds"),
+                           "market": market, "what": what})
+    if len(_send_failures) > 20:
+        del _send_failures[: len(_send_failures) - 20]
+    logging.error(f"Telegram delivery failed [{market}] {what}")
+
+
 def _drain_events(market: str) -> list[dict]:
     kept = [e for e in _event_log if e["market"] != market]
     drained = [e for e in _event_log if e["market"] == market]
@@ -989,8 +1005,10 @@ async def sgx_watcher():
                                                          msg_pos.get("position_value_sgd") if msg_pos else None,
                                                          regime.get("sgd_to_usd", 0.74),
                                                      ))
-                    telegram_bot.send(msg + order_note)
-                    _log_event("SGX", f"{action} {symbol} @ S${price:.3f} — {signal['suggested_action']}", sent=True)
+                    ok = telegram_bot.send(msg + order_note)
+                    if not ok:
+                        _note_send_failure("SGX", f"{action} {symbol} alert")
+                    _log_event("SGX", f"{action} {symbol} @ S${price:.3f} — {signal['suggested_action']}", sent=ok)
 
                 _remember_signal(_last_sgx_signals, "SGX", symbol, action)
 
@@ -1160,6 +1178,56 @@ def _median(vals: list[float]) -> float:
     s = sorted(vals)
     mid = len(s) // 2
     return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+# SGX order alerts fire in the 17:00–17:30 close window and are acted on at the
+# NEXT 9:00 AM open, so yesterday evening's unreported alert is exactly what this
+# morning's briefing should be chasing. Anything older is not chased: slippage is
+# measured against a moomoo order actually placed at the time, so a week-old
+# signal can never be filled, and nagging about it would make the block permanent
+# furniture that stops being read. Stale ones still count as missed in
+# /discipline — that metric is meant to show them.
+FILL_CHASE_DAYS = 2
+
+
+def _pending_fill_block(now_sgt: datetime) -> list[str]:
+    """Briefing lines chasing SGX alerts that can still be filled.
+
+    Returns [] when there is nothing outstanding, so the block simply does not
+    appear on a clean day.
+    """
+    try:
+        pending = db.get_pending_fills()
+    except Exception as e:
+        logging.warning(f"pending-fill block failed: {e}")
+        return []
+
+    chase = []
+    for r in pending:
+        try:
+            age = now_sgt - datetime.fromisoformat(r["signal_ts"])
+        except (ValueError, TypeError):
+            continue
+        if timedelta(0) <= age <= timedelta(days=FILL_CHASE_DAYS):
+            chase.append((age, r))
+    if not chase:
+        return []
+
+    chase.sort(key=lambda t: t[0], reverse=True)  # oldest first — closest to expiring
+    lines = ["", f"📝 <b>Awaiting /fill</b> ({len(chase)})"]
+    for age, r in chase:
+        hrs = age.total_seconds() / 3600
+        when = f"{hrs:.0f}h ago" if hrs < 24 else f"{hrs / 24:.0f}d ago"
+        lines.append(f"• {r['side']} {r['symbol']} @ S${r['signal_price']:.3f} — {when}")
+    # Placeholder, never the signal price: a copy-pasteable `/fill BUOU 1.000`
+    # would log exactly 0.00% slippage and quietly poison the one measurement
+    # this whole path exists to produce.
+    oldest = chase[0][1]
+    lines.append(
+        f"<i>After placing in moomoo:</i> <code>/fill {oldest['symbol']} "
+        f"&lt;your fill price&gt;</code>"
+    )
+    return lines
 
 
 def _slippage_verdict(mean_slip: float, n: int) -> str:
@@ -2430,6 +2498,13 @@ async def send_sgx_morning_briefing():
         "━━━━━━━━━━━━━━━━",
         "📈 <b>Paper strategy · not owned</b>",
         "<i>Ideas from the 27-name screener</i>",
+    ]
+    # Yesterday's unreported alert comes before today's new ideas: it is the one
+    # being acted on at the open a half hour from now. Sits inside the paper
+    # block because that is what it belongs to — the holdings section above
+    # stays one contiguous block.
+    lines += _pending_fill_block(now_sgt)
+    lines += [
         "",
         "⚡ <b>Act at open (9:00 AM SGT)</b>",
     ]
@@ -2746,7 +2821,8 @@ async def health():
     # so heavy watcher scans on the tiny free-tier CPU never make the
     # app look dead to Render or UptimeRobot. Accepts HEAD because
     # UptimeRobot pings with HEAD by default.
-    return {"ok": True, "commit": os.getenv("RENDER_GIT_COMMIT", "")[:7], "scans": _heartbeats}
+    return {"ok": True, "commit": os.getenv("RENDER_GIT_COMMIT", "")[:7], "scans": _heartbeats,
+            "send_failures": _send_failures[-5:]}
 
 
 @app.get("/api/status")
