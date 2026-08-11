@@ -116,6 +116,11 @@ SGT = ZoneInfo("Asia/Singapore")
 # Shadow-run window agreed 2026-07-12: strategy D vs SPY with pre-committed criteria
 VALIDATION_START = "2026-07-13"
 
+# Every SGX alert before this fired past the close and was impossible to fill —
+# see _sgx_entry_confirm_window. They are held out of the /discipline denominator
+# so the metric measures the user's follow-through, not the window bug.
+SGX_WINDOW_FIX = "2026-08-11T17:30:00+08:00"
+
 # Process start — shown in /health so "heartbeat missing" is readable as
 # "restarted recently" vs "watcher actually dead" (heartbeats are in-memory)
 _START_TS = datetime.now(ZoneInfo("Asia/Singapore"))
@@ -225,11 +230,18 @@ def _us_entry_confirm_window() -> bool:
 
 
 def _sgx_entry_confirm_window() -> bool:
-    """True in the last 30 min of the SGX session (17:00–17:30 SGT) — same
-    close-confirmation rationale as the US window."""
+    """True in the last 30 min of SGX continuous trading (16:30–17:00 SGT) —
+    same close-confirmation rationale as the US window.
+
+    This was 17:00–17:30 until 2026-08-11, written as if SGX closed at 17:30.
+    It does not: continuous trading ends at 17:00 and the pre-close auction
+    stops matching by ~17:06. The window therefore sat entirely past the close,
+    and all 25 BUY alerts ever issued (2026-07-16 → 2026-08-11) landed between
+    17:00:06 and 17:23:32 — none of them fillable that day. Keep both bounds
+    inside continuous trading; an alert you cannot act on is not a signal."""
     now = datetime.now(SGT)
-    start = now.replace(hour=17, minute=0, second=0, microsecond=0)
-    close = now.replace(hour=17, minute=30, second=0, microsecond=0)
+    start = now.replace(hour=16, minute=30, second=0, microsecond=0)
+    close = now.replace(hour=17, minute=0, second=0, microsecond=0)
     return start <= now < close
 
 
@@ -478,12 +490,13 @@ def _sgx_market_is_open() -> bool:
     now = datetime.now(SGT)
     if now.weekday() >= 5:
         return False
+    # SGX trades continuously 09:00–17:00 SGT; the pre-close auction accepts
+    # orders until ~17:05. There is NO midday break — SGX abolished it in
+    # August 2011, but this function blocked 12:00–13:00 until 2026-08-11,
+    # which silently froze trailing-stop checks and the holdings monitor for
+    # an hour every trading day.
     open_t  = now.replace(hour=9,  minute=0, second=0, microsecond=0)
-    close_t = now.replace(hour=17, minute=30, second=0, microsecond=0)
-    lunch_s = now.replace(hour=12, minute=0, second=0, microsecond=0)
-    lunch_e = now.replace(hour=13, minute=0, second=0, microsecond=0)
-    if lunch_s <= now < lunch_e:
-        return False
+    close_t = now.replace(hour=17, minute=5, second=0, microsecond=0)
     return open_t <= now < close_t
 
 
@@ -857,7 +870,7 @@ async def crypto_watcher():
 
 async def sgx_watcher():
     """Auto-executes SGX signals via Futu OpenD (paper by default).
-    Runs every 5 min during SGX market hours (9:00–12:00, 13:00–17:30 SGT).
+    Runs every 5 min during SGX market hours (9:00–17:00 SGT, no midday break).
     Position sizing is cash-only — never exceeds available cash balance."""
     await asyncio.sleep(60)
     while True:
@@ -1198,9 +1211,12 @@ def _median(vals: list[float]) -> float:
     return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
 
 
-# SGX order alerts fire in the 17:00–17:30 close window and are acted on at the
-# NEXT 9:00 AM open, so yesterday evening's unreported alert is exactly what this
-# morning's briefing should be chasing. Anything older is not chased: slippage is
+# SGX order alerts fire in the 16:30–17:00 close window, so they are fillable
+# the SAME afternoon (before 2026-08-11 they fired past the close and could only
+# be acted on at the next open — see _sgx_entry_confirm_window). Yesterday's
+# unreported alert is still what this morning's briefing chases: the order was
+# placeable, so the gap is the fill report, not the opportunity.
+# Anything older is not chased: slippage is
 # measured against a moomoo order actually placed at the time, so a week-old
 # signal can never be filled, and nagging about it would make the block permanent
 # furniture that stops being read. Stale ones still count as missed in
@@ -1820,9 +1836,17 @@ def _format_discipline() -> str:
                 "fires — report your moomoo fills with /fill.")
 
     now = datetime.now(SGT)
-    acted, missed, fresh = [], [], []
+    cutoff = datetime.fromisoformat(SGX_WINDOW_FIX)
+    acted, missed, fresh, unfillable = [], [], [], []
     resp_hours = []
     for r in rows:
+        try:
+            fired_before_fix = datetime.fromisoformat(r["signal_ts"]) < cutoff
+        except (ValueError, TypeError):
+            fired_before_fix = False
+        if fired_before_fix and not r.get("fill_ts"):
+            unfillable.append(r)
+            continue
         if r.get("fill_ts"):
             acted.append(r)
             try:
@@ -1845,15 +1869,19 @@ def _format_discipline() -> str:
         "📝 <b>Discipline — SGX Alerts</b> · 🇸🇬",
         "",
         "<code>"
-        f"Alerts    {len(rows)}\n"
-        f"Acted ≤1d {within_1d}/{eligible}  ({pct:.0f}%)"
+        f"Alerts    {len(rows) - len(unfillable)}\n"
+        + (f"Acted ≤1d {within_1d}/{eligible}  ({pct:.0f}%)" if eligible else "Acted ≤1d —")
         + (f"\nMedian    {_median(resp_hours):.1f}h to /fill" if resp_hours else "")
         + (f"\nPending   {len(fresh)}  (&lt;1d old)" if fresh else "")
         + "</code>",
         "",
-        ("✅ On track — criterion is ≥90% acted within a day"
-         if pct >= 90 else "⚠️ Below the pre-committed ≥90% criterion"),
+        ("⏳ No scoreable alerts yet — the next BUY starts the record" if not eligible else
+         "✅ On track — criterion is ≥90% acted within a day" if pct >= 90 else
+         "⚠️ Below the pre-committed ≥90% criterion"),
     ]
+    if unfillable:
+        lines += ["", f"🐛 {len(unfillable)} earlier alert(s) excluded — they fired after "
+                      "the SGX close (window bug, fixed 2026-08-11) and could not be filled."]
     outstanding = missed + fresh
     if outstanding:
         lines += ["", "👀 <b>Awaiting /fill</b>"]
