@@ -14,6 +14,7 @@ import { PnLChart } from './components/PnLChart'
 import { OptionsTradeLog } from './components/OptionsTradeLog'
 import { StrategyCompare } from './components/StrategyCompare'
 import { TrackPanel } from './components/TrackPanel'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import type { MarketRegime, SignalsResponse, OptionsResponse, SpreadOpportunitiesResponse, Trade } from './types'
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000
@@ -290,6 +291,9 @@ export default function App() {
         )}
 
         <div className="px-4 md:px-8 py-6 space-y-5 max-w-screen-xl mx-auto">
+          {/* key={tab} gives each tab its own boundary, so a panel that throws
+              is contained and switching away clears it */}
+          <ErrorBoundary key={tab} label={tab}>
           {/* Dashboard tab */}
           {tab === 'dashboard' && (
             <>
@@ -367,6 +371,7 @@ export default function App() {
           {tab === 'compare' && (
             <StrategyCompare trades={trades} />
           )}
+          </ErrorBoundary>
 
           <div className="text-xs text-center pb-2" style={{ color: '#333' }}>
             Auto-refreshes every 5 min · Data via Yahoo Finance · Not financial advice
