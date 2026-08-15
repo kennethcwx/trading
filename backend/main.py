@@ -3433,9 +3433,16 @@ async def get_sgx_fills():
 
     Exists because `sgx_fills` was previously reachable only through /slippage
     and /discipline on Telegram, so "no trades logged" could not be told apart
-    from "no alerts ever fired" without the user's phone. `n_pending > 0` means
-    alerts fired and went unanswered (a workflow gap); `total == 0` means no SGX
-    order alert has ever fired (look at the signal path, not the user).
+    from "no alerts ever fired" without the user's phone.
+
+    **Alerts that fired before SGX_WINDOW_FIX are held out of every count that
+    implies a missed reply**, exactly as /discipline holds them out of its
+    denominator. They landed after the close and could not be filled that day,
+    so counting them as unanswered blames the user for a bug in the window.
+    This endpoint drew that wrong conclusion once already — on 2026-08-06 it was
+    read as "the signal path works, the gap is in reporting fills", and the real
+    fault was that no alert had ever been fillable. `n_missed > 0` is only
+    evidence of a workflow gap now that `n_fillable` excludes them.
 
     Deliberately does one query and no price lookups, so it answers fast on a
     cold free-tier backend.
@@ -3443,8 +3450,19 @@ async def get_sgx_fills():
     rows = [dict(r) for r in db.get_all_sgx_signals()]
 
     now = datetime.now(SGT)
-    reported, fresh, missed = [], [], []
+    cutoff = datetime.fromisoformat(SGX_WINDOW_FIX)
+    reported, fresh, missed, unfillable = [], [], [], []
     for r in rows:
+        try:
+            fired_before_fix = datetime.fromisoformat(r["signal_ts"]) < cutoff
+        except (ValueError, TypeError):
+            fired_before_fix = False
+        # A pre-fix alert that WAS filled still counts as reported — he acted on
+        # it somehow, and its slippage is real data. Only the unanswered ones are
+        # held out, because those are the ones the window bug explains.
+        if fired_before_fix and not r.get("fill_ts"):
+            unfillable.append(r)
+            continue
         if r.get("fill_ts"):
             reported.append(r)
             continue
@@ -3469,20 +3487,34 @@ async def get_sgx_fills():
             "verdict": _slippage_verdict(mean_slip, len(slips)),
         }
 
+    fillable = len(rows) - len(unfillable)
+    # Always said when any are excluded: the counts below are otherwise easy to
+    # read against `total` and land back on the conclusion this endpoint got wrong.
+    excluded = (f" {len(unfillable)} earlier alert(s) are excluded — they fired after the "
+                "SGX close (window bug, fixed 2026-08-11) and could never have been filled."
+                ) if unfillable else ""
+
     if not rows:
         diagnosis = ("No SGX order alert has ever been recorded. The empty trades "
                      "table is not a missed-reply problem — nothing ever asked for a /fill.")
+    elif not fillable:
+        diagnosis = (f"No alert has ever been fillable: all {len(rows)} fired past the SGX "
+                     "close, before the window fix. Nothing here is a reporting gap.")
     elif missed:
-        diagnosis = (f"{len(missed)} alert(s) older than a day are still awaiting /fill. "
-                     "The signal path works; the gap is in reporting fills.")
+        diagnosis = (f"{len(missed)} fillable alert(s) older than a day are still awaiting "
+                     f"/fill.{excluded}")
     elif fresh and not reported:
         diagnosis = (f"{len(fresh)} alert(s) fired within the last day and are still "
-                     "actionable. Nothing is wrong yet.")
+                     f"actionable. Nothing is wrong yet.{excluded}")
     else:
-        diagnosis = f"{len(reported)} of {len(rows)} alert(s) reported."
+        diagnosis = f"{len(reported)} of {fillable} fillable alert(s) reported.{excluded}"
 
     return {
         "total": len(rows),
+        # The denominator worth reading. `total` counts alerts the system issued;
+        # this counts the ones it was ever possible to answer.
+        "n_fillable": fillable,
+        "n_unfillable": len(unfillable),
         "n_reported": len(reported),
         "n_pending": len(fresh) + len(missed),
         "n_missed": len(missed),
@@ -3491,6 +3523,8 @@ async def get_sgx_fills():
         "stats": stats,
         "reported": reported,
         "pending": missed + fresh,
+        # Kept visible rather than dropped — they are the record of the bug.
+        "unfillable": unfillable,
     }
 
 
