@@ -367,6 +367,19 @@ def init_db():
     )
     conn.commit()
 
+    # Small key-value store for "has this scheduled push already gone out".
+    # A weekly job cannot hold that answer in memory: Render restarts the
+    # process on every deploy and on its own schedule, so an in-memory marker
+    # would let a catch-up re-send the same verdict after each restart.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS app_state (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+
     cur.close()
     conn.close()
 
@@ -505,6 +518,35 @@ def save_signal_state(strategy: str, symbol: str, action: str) -> None:
             "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
             "ON CONFLICT (strategy, symbol) DO UPDATE SET action = excluded.action, updated_at = CURRENT_TIMESTAMP",
             (strategy, symbol, action),
+        )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ── Scheduled-push bookkeeping ────────────────────────────────────────────────
+
+def get_state(key: str) -> str | None:
+    row = fetchone("SELECT value FROM app_state WHERE key=?", (key,))
+    return row["value"] if row else None
+
+
+def set_state(key: str, value: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    if _USE_PG:
+        cur.execute(
+            "INSERT INTO app_state (key, value, updated_at) "
+            "VALUES (%s, %s, CURRENT_TIMESTAMP) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP",
+            (key, value),
+        )
+    else:
+        cur.execute(
+            "INSERT INTO app_state (key, value, updated_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+            (key, value),
         )
     conn.commit()
     cur.close()

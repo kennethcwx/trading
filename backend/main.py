@@ -1655,14 +1655,19 @@ def _us10k_stats(rows: list[dict], base_usd: float) -> dict:
 US10K_MIN_LEGS_FOR_VERDICT = 20
 
 
-async def _send_algocheck():
-    """Compare the auto-logged track against strategy D's backtest expectations."""
+async def _send_algocheck(note: str = "") -> bool:
+    """Compare the auto-logged track against strategy D's backtest expectations.
+
+    Returns whether the message reached Telegram, so the weekly scheduler can
+    retry a dropped push instead of counting it as delivered and then going
+    quiet for another seven days. `note` carries the scheduler's catch-up line.
+    """
     loop = asyncio.get_event_loop()
     try:
         rows = db.get_all_paper_trades(US10K_TRACK)
     except Exception as e:
         telegram_bot.send(f"❌ /algocheck failed reading the track.\n<code>{e}</code>")
-        return
+        return False
 
     n_closed = sum(1 for r in rows if r.get("exit_price") is not None)
     days = (datetime.now(SGT).date()
@@ -1671,26 +1676,26 @@ async def _send_algocheck():
     head = [
         "🔬 <b>Algo Check · US Track</b>",
         f"<code>Strategy D · day {days} · {len(rows)} entries, {n_closed} closed</code>",
-        "",
     ]
+    if note:
+        head.append(note)
+    head.append("")
 
     # Both early exits below are answerable without an FX rate, so the lookup
     # waits until there is something to convert.
     if not rows:
-        telegram_bot.send("\n".join(head + [
+        return telegram_bot.send("\n".join(head + [
             "Nothing logged yet — the track opens its first position on the "
             "next strategy D BUY in the 03:30–04:00 SGT close window.",
         ]))
-        return
 
     if n_closed == 0:
-        telegram_bot.send("\n".join(head + [
+        return telegram_bot.send("\n".join(head + [
             f"{len(rows)} position(s) open, none closed yet.",
             "",
             "No verdict is possible until trades exit — an open position's P&L "
             "is a quote, not a result. <code>/track</code> shows the marks.",
         ]))
-        return
 
     try:
         regime = await asyncio.wait_for(
@@ -1762,7 +1767,7 @@ async def _send_algocheck():
 
     lines += ["", "<code>Max DD is realized-only — a floor, not the true "
                   "figure. Open-position excursions aren't counted.</code>"]
-    telegram_bot.send("\n".join(lines))
+    return telegram_bot.send("\n".join(lines))
 
 
 async def _undo_last_fill():
@@ -2674,6 +2679,27 @@ async def daily_summary_task(market: str, hour: int, minute: int, skip_weekdays:
             await asyncio.sleep(60)
 
 
+# How often the weekly task re-asks whether the verdict is due. Also the worst
+# case by which a push lands after its scheduled minute.
+ALGOCHECK_POLL_MIN = 10
+# How late a missed verdict may still arrive. Past this it is stale news
+# competing with the next one, so the week closes unsent instead.
+ALGOCHECK_CATCHUP_HOURS = 72
+ALGOCHECK_STATE_KEY = "algocheck_last_sent_week"
+
+# Mirrors the app_state row so a healthy week costs no database round-trips.
+_algocheck_sent_tag: str | None = None
+
+
+def _last_scheduled(now: datetime, weekday: int, hour: int, minute: int) -> datetime:
+    """The most recent weekday-at-hh:mm falling at or before `now`."""
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    target -= timedelta(days=(target.weekday() - weekday) % 7)
+    if target > now:
+        target -= timedelta(days=7)
+    return target
+
+
 async def weekly_algocheck_task(weekday: int = 5, hour: int = 9, minute: int = 0):
     """Push the algo verdict weekly — Saturday 09:00 SGT, after Friday's US
     session has closed and settled.
@@ -2682,22 +2708,49 @@ async def weekly_algocheck_task(weekday: int = 5, hour: int = 9, minute: int = 0
     to remember to open: the question "is this working" gets answered on a
     schedule instead of waiting to be asked. The manual-input version of this
     loop logged nothing for three weeks.
+
+    Which is why the original shape was wrong. It slept once, straight to the
+    next Saturday, and two ordinary events silently cost a whole week: a restart
+    across 09:00 (Render redeploys on every push and cycles instances on its
+    own) recomputed the target to the *following* Saturday, and any failure fell
+    into the handler, backed off, and did the same. telegram_bot.send() swallows
+    its exceptions and returns False, so a dropped message did not even reach
+    the handler — it looked exactly like a delivered one. The one job whose
+    point is answering without being asked could go quiet without saying so.
+
+    So it polls instead. Every few minutes it asks whether this week's verdict
+    is due and still unsent; the answer lives in the database, so it survives a
+    restart, and a push that fails is simply never marked sent — the next poll
+    retries it, until the catch-up window closes.
     """
+    global _algocheck_sent_tag
     await asyncio.sleep(90)
     while True:
         try:
             now = datetime.now(SGT)
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            while target.weekday() != weekday:
-                target += timedelta(days=1)
-            await asyncio.sleep((target - datetime.now(SGT)).total_seconds())
-            if US10K_ENABLED:
-                await _send_algocheck()
+            due = _last_scheduled(now, weekday, hour, minute)
+            tag = due.strftime("%Y-%m-%d")
+            late = now - due
+            # Ordered cheapest-first: most polls fall outside the window or hit
+            # the memo, and never open a connection.
+            if (US10K_ENABLED
+                    and late <= timedelta(hours=ALGOCHECK_CATCHUP_HOURS)
+                    and _algocheck_sent_tag != tag):
+                if db.get_state(ALGOCHECK_STATE_KEY) == tag:
+                    _algocheck_sent_tag = tag
+                else:
+                    note = ""
+                    if late >= timedelta(minutes=ALGOCHECK_POLL_MIN * 2):
+                        note = (f"<i>Catch-up — this was due "
+                                f"{due:%a %d %b %H:%M} SGT.</i>")
+                    if await _send_algocheck(note):
+                        db.set_state(ALGOCHECK_STATE_KEY, tag)
+                        _algocheck_sent_tag = tag
+                    else:
+                        _note_send_failure("US", f"weekly algocheck for {tag}")
         except Exception as e:
             logging.warning(f"weekly algocheck error: {e}")
-            await asyncio.sleep(300)
+        await asyncio.sleep(ALGOCHECK_POLL_MIN * 60)
 
 
 async def morning_briefing_task():
