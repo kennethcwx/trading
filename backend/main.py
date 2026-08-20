@@ -420,9 +420,11 @@ def _run_us10k_track(stock_data: list[dict], regime: dict, sgd_to_usd: float,
 
             # Trailing stop on the half-sold remainder. Deliberately mirrors the
             # S$5k rule (arms off gain-from-entry, de-arms on retrace) rather
-            # than crypto's persistent trail — US exit logic is frozen until the
-            # 2026-09-01 check-in, and a track that exits differently would not
-            # be measuring the strategy under review.
+            # than crypto's persistent trail: persistent arming was measured on
+            # US data and rejected — see the trail-stop note in the live alert
+            # path, and research/phase2-persistent-trail-2026-07-19.md. A track
+            # that exits differently would also not be measuring the strategy
+            # under review.
             if row.get("half_sold") == 1:
                 prev_peak = row.get("peak_price") or row["entry_price"]
                 peak = max(prev_peak, price)
@@ -690,9 +692,15 @@ async def signal_watcher():
                 trail_stop = new_peak * (1 - TRAILING_STOP_PCT)
                 # Crypto arms off PEAK gain and stays armed — the de-arm-on-retrace
                 # behavior round-trips crypto winners to breakeven (backtest: fixing
-                # it adds ~0.4pp CAGR and cuts drawdown). US keeps the old behavior
-                # until the 2026-09-01 A/B/C/D check-in; changing it now would alter
-                # frozen exit logic mid-validation.
+                # it adds ~0.4pp CAGR and cuts drawdown). US deliberately keeps
+                # de-arming: the same change was measured on US data 2026-07-19 and
+                # LOST — CAGR +7.9% → +5.9% to buy 0.2pp of maxDD, and walk-forward
+                # consistency 6/8 → 4/8 positive windows. De-arming is worth about
+                # +2% CAGR/yr here; it is not a bug awaiting the 09-01 review, and
+                # 09-01 has nothing left to decide about it.
+                # Evidence: research/phase2-persistent-trail-2026-07-19.md.
+                # Crypto is not contradicted — its 1×ATR/8% stop is noise-level,
+                # which is the whole reason the two markets differ here.
                 arm_gain = (new_peak - ep) / ep if sym in CRYPTO_WATCHLIST else gain
                 if arm_gain >= TRAILING_TRIGGER and current <= trail_stop:
                     flag = telegram_bot.MARKET_ICON["CRYPTO" if sym in CRYPTO_WATCHLIST else "US"]
