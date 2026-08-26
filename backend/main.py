@@ -820,11 +820,16 @@ async def _build_crypto_snapshot(regime: dict, sgd_to_usd: float) -> list[dict]:
 
 
 async def crypto_watcher():
-    """4-hour digest for all crypto coins. Immediate alert on SELL/stop-loss for held positions."""
+    """8-hour digest for all crypto coins. Immediate alert on SELL/stop-loss for held positions."""
     await asyncio.sleep(45)
     loop = asyncio.get_event_loop()
     cycle = 0
-    DIGEST_EVERY = 8  # 8 × 30 min = 4 hours
+    # 2026-08-27: cut from 4h to 8h. At 6 digests/day the pulse was ~60% of every
+    # scheduled push the bot sent, and most of them repeated the previous one --
+    # BTC's 200 SMA gate was off from 2025-11-03 to 2026-08-18, so nine of those
+    # months could not produce an entry at all. Actionable BUYs and exits on held
+    # positions still fire immediately below; only the recap is thinned.
+    DIGEST_EVERY = 16  # 16 × 30 min = 8 hours
 
     while True:
         try:
@@ -862,7 +867,7 @@ async def crypto_watcher():
 
                 _remember_signal(_last_crypto_signals, "CRYPTO", symbol, action)
 
-            # Every 4 hours: send full digest
+            # Every 8 hours: send full digest
             cycle += 1
             if cycle >= DIGEST_EVERY:
                 cycle = 0
