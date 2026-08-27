@@ -11,6 +11,20 @@ CRYPTO_WATCHLIST = [
 ]
 CRYPTO_POSITION_SGD = 350   # ~$260 USD per trade
 
+# Crypto shadow track -- runs NO_RSI_CAP beside the live BASELINE rule, silent
+# and isolated in paper_trades. It exists to price ONE thing: what the RSI < 70
+# momentum ceiling costs in signals and earns in expectancy. In the 08-19->08-26
+# rally all five coins broke to 20-day highs on heavy volume, but BTC/ETH/SOL/XRP
+# were at RSI 83-88 by then and were rejected on that alone -- only INJ, the
+# laggard, was still inside the band. Walk-forward over 4y says dropping the
+# ceiling gives +33% entries at ~-1pp expectancy, with the best window
+# consistency of any variant tested (7/8 positive). Forward test settles it.
+CRYPTO_SHADOW_ENABLED = True
+CRYPTO_SHADOW_TRACK = "crypto_shadow"
+CRYPTO_SHADOW_VARIANT = "NO_RSI_CAP"
+CRYPTO_SHADOW_PORTFOLIO_SGD = 5000     # matches the live crypto pool base
+CRYPTO_SHADOW_START = "2026-08-27"
+
 # Core watchlist — swing trades, technical signals apply
 WATCHLIST = ["AAPL", "MSFT", "NVDA", "BAC", "AMD", "CAT", "ABBV", "AMZN"]
 

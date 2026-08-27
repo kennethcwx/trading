@@ -120,6 +120,13 @@ def generate_signal(analysis: dict, position: dict | None, regime: dict,
         signal_condition = mean_rev
     elif variant == "SWING_LOW_NOCAP":
         signal_condition = mean_rev or momentum_nocap
+    elif variant == "NO_RSI_CAP":
+        # Same entry as D, but keeps the ATR stop instead of the swing-low one --
+        # parity with backtest._entry_no_rsi_cap. Without this branch the variant
+        # fell through to COMBINED, which is STRICTER than BASELINE (RSI ceiling
+        # plus a 20/50 alignment gate), so anything asking for NO_RSI_CAP was
+        # silently getting the opposite of what the name promises.
+        signal_condition = mean_rev or momentum_nocap
     elif variant == "BASELINE":
         signal_condition = mean_rev or momentum_baseline
     else:

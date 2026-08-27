@@ -318,7 +318,8 @@ def format_news_alert(symbol: str, pct_change: float, price: float, headlines: l
     return "\n".join(lines)
 
 
-def format_crypto_digest(rows: list[dict], sgd_to_usd: float = 0.74) -> str:
+def format_crypto_digest(rows: list[dict], sgd_to_usd: float = 0.74,
+                         shadow: dict | None = None) -> str:
     from datetime import datetime
     from zoneinfo import ZoneInfo
     time_str = datetime.now(ZoneInfo("Asia/Singapore")).strftime("%H:%M SGT")
@@ -364,6 +365,18 @@ def format_crypto_digest(rows: list[dict], sgd_to_usd: float = 0.74) -> str:
             f"Entry  ${price:,.2f}  Stop ${stop:,.2f} ({_pct(stop, price)})  Target ${target:,.2f} ({_pct(target, price)})"
             + (f"\nSize   {ps['shares']:.4f}  (S${ps['position_value_sgd']:,.0f} ≈ ${ps['position_value_usd']:,.0f})" if ps else "")
             + "</code>",
+        ]
+
+    # Shadow track: one line, no second message. Frequency is the fast half of
+    # the comparison and shows up in days; the P&L half needs months.
+    if shadow and shadow.get("entries") is not None:
+        pnl = shadow.get("realized_usd") or 0
+        pnl_str = f" · {'+' if pnl >= 0 else ''}${pnl:,.0f} realized" if pnl else ""
+        lines += [
+            "",
+            f"<i>Shadow ({shadow['variant']}): {shadow['entries']} entries vs live "
+            f"{shadow['live_entries']} since {shadow['since']} · "
+            f"{shadow['open']} open{pnl_str}</i>",
         ]
 
     lines += ["", "<i>Not financial advice · crypto is 24/7 — enter when ready</i>"]

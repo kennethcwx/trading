@@ -23,7 +23,7 @@ import telegram_bot
 import news
 from analysis import get_market_regime, get_crypto_regime, get_sgx_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, get_return_since, get_holding_events, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, SGX_HOLDINGS, HOLDINGS_MOVE_ALERT_PCT, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, MAX_SECTOR_PCT, TICKER_SECTORS, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO, US10K_ENABLED, US10K_TRACK, US10K_PORTFOLIO_SGD, US10K_VARIANT, US10K_START, US10K_EXPECT_CAGR, US10K_EXPECT_MAXDD, US10K_EXPECT_PER_TRADE
+from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, CRYPTO_SHADOW_ENABLED, CRYPTO_SHADOW_TRACK, CRYPTO_SHADOW_VARIANT, CRYPTO_SHADOW_PORTFOLIO_SGD, CRYPTO_SHADOW_START, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, SGX_HOLDINGS, HOLDINGS_MOVE_ALERT_PCT, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, MAX_SECTOR_PCT, TICKER_SECTORS, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO, US10K_ENABLED, US10K_TRACK, US10K_PORTFOLIO_SGD, US10K_VARIANT, US10K_START, US10K_EXPECT_CAGR, US10K_EXPECT_MAXDD, US10K_EXPECT_PER_TRADE
 
 logging.basicConfig(level=logging.INFO)
 
@@ -757,6 +757,159 @@ async def signal_watcher():
         await asyncio.sleep(5 * 60)  # check every 5 minutes
 
 
+def _crypto_shadow_equity_sgd(sgd_to_usd: float) -> float:
+    """Compounding equity for the crypto shadow track. Same reasoning as
+    _us10k_equity_sgd: the backtest risks 1% of *current* equity, so sizing off
+    the fixed base would drift from the numbers this track is compared against.
+    Reads only paper_trades."""
+    try:
+        rows = db.fetch(
+            "SELECT realized_pnl_usd FROM paper_trades WHERE track = ?",
+            (CRYPTO_SHADOW_TRACK,),
+        )
+        realized_usd = sum(r.get("realized_pnl_usd") or 0 for r in rows)
+        return CRYPTO_SHADOW_PORTFOLIO_SGD + (realized_usd / sgd_to_usd if sgd_to_usd else 0)
+    except Exception as e:
+        logging.warning(f"crypto shadow equity calc failed, using fixed base: {e}")
+        return CRYPTO_SHADOW_PORTFOLIO_SGD
+
+
+def _crypto_shadow_summary() -> dict | None:
+    """Counts for the Crypto Pulse line: how many entries each rule has taken
+    since the shadow started. This is the fast half of the experiment -- the
+    frequency answer lands in days, the P&L answer takes months."""
+    try:
+        shadow = db.get_all_paper_trades(CRYPTO_SHADOW_TRACK)
+        live_rows = db.fetch("SELECT symbol, entry_date FROM trades")
+    except Exception as e:
+        logging.warning(f"crypto shadow summary failed: {e}")
+        return None
+    live_n = sum(
+        1 for r in live_rows
+        if r["symbol"] in CRYPTO_WATCHLIST and (r.get("entry_date") or "") >= CRYPTO_SHADOW_START
+    )
+    return {
+        "variant": CRYPTO_SHADOW_VARIANT,
+        "since": CRYPTO_SHADOW_START,
+        "entries": len(shadow),
+        "open": sum(1 for r in shadow if r.get("exit_price") is None),
+        "live_entries": live_n,
+        "realized_usd": sum(r.get("realized_pnl_usd") or 0 for r in shadow),
+    }
+
+
+def _run_crypto_track(rows: list[dict], regime: dict, sgd_to_usd: float) -> dict | None:
+    """Auto-fill the crypto shadow track (NO_RSI_CAP) beside the live BASELINE rule.
+
+    Runs off the batch crypto_watcher has already fetched, so it adds no network
+    calls. Reads and writes ONLY paper_trades -- the live `trades` rows, the
+    Telegram alerts and /portfolio are never touched, which is what lets this
+    run alongside rather than on top.
+
+    One deliberate difference from _run_us10k_track: the trailing stop mirrors
+    CRYPTO's persistent arming (off peak gain, stays armed) rather than the US
+    de-arming rule. A track that exits differently would not be measuring the
+    entry change under review -- and de-arming was measured on US data and is
+    right there, wrong here (see the trail note in the live alert path).
+
+    Silent by design: it logs and returns counts for the pulse line, never sends.
+    """
+    if not CRYPTO_SHADOW_ENABLED:
+        return None
+    try:
+        open_rows = db.get_open_paper_trades(CRYPTO_SHADOW_TRACK)
+    except Exception as e:
+        logging.warning(f"crypto shadow: cannot read open trades, skipping pass: {e}")
+        return None
+
+    by_symbol = {r["symbol"]: r for r in open_rows}
+    position_map = {
+        r["symbol"]: {
+            "avg_cost": r["entry_price"],
+            "shares": r["shares"],
+            "entry_date": r.get("entry_date"),
+            "stop_loss": r.get("stop_loss"),
+            "profit_target": r.get("profit_target"),
+        }
+        for r in open_rows
+    }
+    equity_sgd = _crypto_shadow_equity_sgd(sgd_to_usd)
+    today = datetime.now(SGT).strftime("%Y-%m-%d")
+
+    for r in rows:
+        symbol = r["symbol"]
+        price = r["analysis"].get("price")
+        if not price or price <= 0:
+            continue
+        position = position_map.get(symbol)
+        try:
+            sig = generate_signal(
+                r["analysis"], position, regime, r["fundamentals"], None,
+                rs_rank=None, sector_ok=None, variant=CRYPTO_SHADOW_VARIANT,
+            )
+        except Exception as e:
+            logging.warning(f"crypto shadow: signal failed for {symbol}: {e}")
+            continue
+        action = sig["action"]
+
+        # -- Entry ----------------------------------------------------------
+        if position is None:
+            if action != "BUY":
+                continue
+            stop = r["analysis"].get("stop_loss")
+            dist = (price - stop) if stop else 0
+            if dist <= 0:
+                continue
+            # Same sizing rule as the live crypto pool, off the shadow's equity:
+            # 1% risk at the stop, capped at the crypto allocation.
+            risk_usd = equity_sgd * sgd_to_usd * RISK_PER_TRADE_PCT
+            cap_usd = CRYPTO_POSITION_SGD * sgd_to_usd
+            qty = round(min(risk_usd / dist * price, cap_usd) / price, 6)
+            if qty <= 0:
+                continue
+            try:
+                db.open_paper_trade(
+                    CRYPTO_SHADOW_TRACK, symbol, CRYPTO_SHADOW_VARIANT, qty, today, price,
+                    stop, r["analysis"].get("profit_target"),
+                    "; ".join(sig.get("reasons") or [])[:400],
+                )
+                logging.info(
+                    f"crypto shadow: OPEN {symbol} {qty} @ ${price:.2f} stop ${stop:.2f}"
+                )
+            except Exception as e:
+                logging.warning(f"crypto shadow: open failed for {symbol}: {e}")
+            continue
+
+        # -- Exits ----------------------------------------------------------
+        row = by_symbol[symbol]
+        try:
+            if action == "SELL":
+                db.close_paper_trade(row["id"], price, today,
+                                     (sig.get("suggested_action") or "Exit signal")[:200])
+                logging.info(f"crypto shadow: CLOSE {symbol} @ ${price:.2f}")
+                continue
+
+            if action == "SELL_HALF" and not row.get("half_sold"):
+                db.sell_half_paper_trade(row["id"], price)
+                logging.info(f"crypto shadow: HALF {symbol} @ ${price:.2f}")
+                continue
+
+            if row.get("half_sold") == 1:
+                prev_peak = row.get("peak_price") or row["entry_price"]
+                peak = max(prev_peak, price)
+                if peak > prev_peak:
+                    db.update_paper_peak(row["id"], peak)
+                # Persistent arm: off PEAK gain, stays armed -- the crypto rule.
+                arm_gain = (peak - row["entry_price"]) / row["entry_price"]
+                if arm_gain >= TRAILING_TRIGGER and price <= peak * (1 - TRAILING_STOP_PCT):
+                    db.close_paper_trade(row["id"], price, today, "Trailing stop")
+                    logging.info(f"crypto shadow: TRAIL CLOSE {symbol} @ ${price:.2f}")
+        except Exception as e:
+            logging.warning(f"crypto shadow: exit handling failed for {symbol}: {e}")
+
+    return _crypto_shadow_summary()
+
+
 async def _build_crypto_snapshot(regime: dict, sgd_to_usd: float) -> list[dict]:
     """Fetch signals for all crypto watchlist coins + any open crypto positions."""
     open_rows = db.fetch(
@@ -867,11 +1020,19 @@ async def crypto_watcher():
 
                 _remember_signal(_last_crypto_signals, "CRYPTO", symbol, action)
 
+            # Shadow track runs every pass, not just digest passes -- an entry
+            # rule that only checks every 8 hours is a different rule.
+            shadow = None
+            try:
+                shadow = _run_crypto_track(rows, regime, sgd_to_usd)
+            except Exception as e:
+                logging.warning(f"crypto shadow track pass failed: {e}")
+
             # Every 8 hours: send full digest
             cycle += 1
             if cycle >= DIGEST_EVERY:
                 cycle = 0
-                telegram_bot.send(telegram_bot.format_crypto_digest(rows, sgd_to_usd))
+                telegram_bot.send(telegram_bot.format_crypto_digest(rows, sgd_to_usd, shadow))
 
             _beat("crypto_scan")
 
@@ -2024,7 +2185,8 @@ async def handle_telegram_command(text: str):
             regime = await asyncio.wait_for(loop.run_in_executor(None, get_crypto_regime, regime), timeout=20)
             sgd_to_usd = regime.get("sgd_to_usd", 0.74)
             rows = await asyncio.wait_for(_build_crypto_snapshot(regime, sgd_to_usd), timeout=45)
-            telegram_bot.send(telegram_bot.format_crypto_digest(rows, sgd_to_usd))
+            telegram_bot.send(telegram_bot.format_crypto_digest(
+                rows, sgd_to_usd, _crypto_shadow_summary()))
         except asyncio.TimeoutError:
             logging.warning("/crypto timed out fetching data")
             telegram_bot.send("❌ Crypto fetch timed out — Yahoo Finance may be slow/rate-limited with the larger watchlist. Try again shortly.")
