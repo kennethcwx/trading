@@ -262,6 +262,136 @@ check("shadow line appears when there is", "Shadow (NO_RSI_CAP)" in withs)
 check("shadow line shows both counts", "1 entries vs live 1" in withs)
 check("it is one line, not a second message", withs.count("Shadow") == 1)
 
+print("\n[7] /shadow -- the per-trade view")
+import asyncio    # noqa: E402
+import inspect    # noqa: E402
+
+SENT = []
+
+
+def with_bot(fn, prices=None):
+    """Run `fn` with Telegram captured and the price feed stubbed.
+
+    A symbol missing from `prices` returns None, which is the same thing the
+    real path produces when Yahoo fails -- that branch has to be exercised,
+    because a shadow position with no quote must not be silently valued at its
+    entry price.
+    """
+    SENT.clear()
+    real_send, real_price = telegram_bot.send, main.get_ticker_analysis
+    telegram_bot.send = lambda msg, **k: SENT.append(msg)
+    main.get_ticker_analysis = lambda sym: (
+        {"price": prices[sym]} if prices and prices.get(sym) is not None else None)
+    try:
+        return fn()
+    finally:
+        telegram_bot.send, main.get_ticker_analysis = real_send, real_price
+
+
+def paper_row(**kw):
+    """One shadow row. SOL at $200 is the divergence the track exists for --
+    live BASELINE refused it on the RSI ceiling, NO_RSI_CAP took it."""
+    row = {"id": 1, "track": config.CRYPTO_SHADOW_TRACK, "symbol": "SOL-USD",
+           "variant": "NO_RSI_CAP", "shares": 1.5, "entry_shares": 1.5,
+           "entry_date": "2026-08-27", "entry_price": 200.0, "stop_loss": 184.0,
+           "profit_target": 232.0, "exit_date": None, "exit_price": None,
+           "exit_reason": None, "half_sold": 0, "peak_price": 200.0,
+           "realized_pnl_usd": 0.0}
+    row.update(kw)
+    return row
+
+
+def run_shadow(rows, prices=None):
+    fake = FakeDB()
+    fake.paper = list(rows)
+    real = main.db
+    main.db = fake
+    try:
+        with_bot(lambda: asyncio.run(main._send_crypto_shadow()), prices)
+    finally:
+        main.db = real
+    return fake, (SENT[-1] if SENT else "")
+
+
+_, msg = run_shadow([])
+check("empty track says so instead of printing an empty table",
+      "No shadow entries yet" in msg)
+check("the empty message still names the variant on trial", "NO_RSI_CAP" in msg)
+
+fake, msg = run_shadow([paper_row()], {"SOL-USD": 220.0})
+check("names the coin the shadow bought", "SOL" in msg)
+check("shows the price it paid", "$200.00" in msg)
+check("shows when it entered", "2026-08-27" in msg)
+check("shows the stop, which the Pulse line never carried", "stop $184.00" in msg)
+check("shows the live price", "now $220.00" in msg)
+check("shows the move off entry", "+10.0%" in msg)
+check("unrealized is shares x move, not the price difference",
+      "Unrealized  +$30.00" in msg)
+check("nothing is realized while the position is open", "Realized    +$0.00" in msg)
+check("reading the track never writes to it",
+      len(fake.paper) == 1 and fake.paper[0]["exit_price"] is None)
+
+_, msg = run_shadow([paper_row()], {})
+check("says so when the price feed returns nothing", "(no live price)" in msg)
+check("and warns that unrealized is short a coin",
+      "leaves out the coins with no live price" in msg)
+check("unrealized stays at zero rather than valuing it at entry",
+      "Unrealized  +$0.00" in msg)
+
+_, msg = run_shadow([paper_row(exit_price=240.0, exit_date="2026-09-02",
+                               exit_reason="TRAIL", realized_pnl_usd=60.0)])
+check("a closed leg shows its exit", "out $240.00" in msg)
+check("and why it exited", "TRAIL" in msg)
+check("realized carries the booked P&L", "Realized    +$60.00" in msg)
+check("open section says none rather than printing a header over nothing",
+      "<b>Open</b>  none" in msg)
+
+# A half-sold row is the trap: it is still open, but half its P&L is already
+# booked. Summing only closed rows would under-report it -- the same rule the
+# US track had to get right.
+_, msg = run_shadow([paper_row(half_sold=1, shares=0.75, realized_pnl_usd=15.0)],
+                    {"SOL-USD": 220.0})
+check("a half-sold row books its first leg into realized while still open",
+      "Realized    +$15.00" in msg)
+check("and is marked as half sold", "·½" in msg)
+check("unrealized uses the REMAINING shares, not the entry size",
+      "Unrealized  +$15.00" in msg)
+
+_, msg = run_shadow([paper_row()], {"SOL-USD": 220.0})
+check("carries the live comparison, since a bare count is what /crypto "
+      "already gives", "1 shadow entries vs live 1" in msg)
+
+real_enabled = main.CRYPTO_SHADOW_ENABLED
+main.CRYPTO_SHADOW_ENABLED = False
+_, msg = run_shadow([paper_row()])
+check("says the track is off rather than showing rows nothing is updating",
+      "switched off" in msg)
+main.CRYPTO_SHADOW_ENABLED = real_enabled
+
+print("\n[8] the command is reachable")
+called = []
+real_fn = main._send_crypto_shadow
+
+
+async def _spy():
+    called.append(True)
+
+
+main._send_crypto_shadow = _spy
+try:
+    with_bot(lambda: asyncio.run(main.handle_telegram_command("/shadow")))
+finally:
+    main._send_crypto_shadow = real_fn
+check("/shadow reaches the shadow view", called == [True])
+check("it acknowledges first, like every other slow command",
+      any("Fetching" in m for m in SENT))
+
+with_bot(lambda: asyncio.run(main.handle_telegram_command("/help")))
+check("/help lists it, or he will never know it exists",
+      any("/shadow" in m for m in SENT))
+check("Telegram's own command menu carries it too",
+      '"command": "shadow"' in inspect.getsource(telegram_bot.set_bot_commands))
+
 print(f"\n{'=' * 60}\n  {passed} passed, {len(failed)} failed")
 if failed:
     for f in failed:

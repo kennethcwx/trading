@@ -551,6 +551,7 @@ def set_bot_commands() -> bool:
         {"command": "algocheck",  "description": "Is the algo working? live results vs backtest"},
         {"command": "health",     "description": "Backend commit, watcher heartbeats, market regime"},
         {"command": "crypto",     "description": "Current signal for BTC, ETH, SOL"},
+        {"command": "shadow",     "description": "Crypto shadow track (NO_RSI_CAP) — entries, stops, P&L"},
         {"command": "signal",     "description": "Signal for any ticker — /signal AAPL"},
         {"command": "scan",       "description": "Screen 70 stocks for watchlist candidates + wheel ideas"},
         {"command": "briefing",   "description": "Send the US pre-open briefing now"},

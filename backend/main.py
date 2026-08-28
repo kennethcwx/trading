@@ -1783,6 +1783,122 @@ async def _send_track():
     telegram_bot.send("\n".join(lines))
 
 
+async def _send_crypto_shadow():
+    """Per-trade view of the shadow track the Crypto Pulse only counts.
+
+    The Pulse line answers "how many"; this answers which coin, at what price,
+    with what stop -- the detail needed to check a divergence against the live
+    rule by hand. Reads paper_trades only and writes nothing, like everything
+    else on this track.
+    """
+    loop = asyncio.get_event_loop()
+    header = [
+        f"🌗 <b>Crypto Shadow · {CRYPTO_SHADOW_VARIANT}</b>",
+        f"<code>Paper only · silent · since {CRYPTO_SHADOW_START}</code>",
+        "",
+    ]
+
+    if not CRYPTO_SHADOW_ENABLED:
+        telegram_bot.send("\n".join(header + [
+            "The shadow track is switched off, so nothing is being logged.",
+        ]))
+        return
+
+    rows = db.get_all_paper_trades(CRYPTO_SHADOW_TRACK)
+    summary = _crypto_shadow_summary()
+
+    # Answer the empty case before paying for price lookups that would only
+    # price nothing.
+    if not rows:
+        telegram_bot.send("\n".join(header + [
+            "No shadow entries yet.",
+            "",
+            f"The track fills itself on the same passes as the live rule — the "
+            f"next {CRYPTO_SHADOW_VARIANT} BUY opens the first position. "
+            "Nothing for you to log.",
+        ]))
+        return
+
+    open_rows = [r for r in rows if r.get("exit_price") is None]
+    closed_rows = [r for r in rows if r.get("exit_price") is not None]
+
+    # Live prices for open rows only. A closed leg's result is already booked
+    # into realized_pnl_usd and a fresh quote cannot change it.
+    prices: dict[str, float | None] = {}
+    if open_rows:
+        async def _price(sym: str):
+            try:
+                a = await loop.run_in_executor(None, get_ticker_analysis, sym)
+                return a["price"] if a else None
+            except Exception:
+                return None
+
+        syms = list(dict.fromkeys(r["symbol"] for r in open_rows))
+        got = await asyncio.gather(*[_price(s) for s in syms], return_exceptions=True)
+        prices = {s: (p if isinstance(p, (int, float)) else None)
+                  for s, p in zip(syms, got)}
+
+    def _m(v: float) -> str:
+        return f"{'+' if v >= 0 else '-'}${abs(v):,.2f}"
+
+    lines = list(header)
+    unrealized_usd = 0.0
+    missing_price = False
+
+    if open_rows:
+        lines.append(f"📋 <b>Open ({len(open_rows)})</b>")
+        block = []
+        for r in open_rows:
+            coin = r["symbol"].replace("-USD", "")
+            half = " ·½" if r.get("half_sold") else ""
+            entry = r["entry_price"]
+            now = prices.get(r["symbol"])
+            stop = r.get("stop_loss")
+            stop_str = f"stop ${stop:,.2f}" if stop else "no stop"
+            block.append(f"{coin:<4} {r['entry_date']}  in ${entry:,.2f}{half}")
+            if now is None:
+                missing_price = True
+                block.append(f"     {r['shares']:.6f} u · {stop_str} · (no live price)")
+            else:
+                unrealized_usd += r["shares"] * (now - entry)
+                pct = ((now - entry) / entry * 100) if entry else 0
+                block.append(f"     {r['shares']:.6f} u · {stop_str} · now ${now:,.2f}"
+                             f"  {'+' if pct >= 0 else ''}{pct:.1f}%")
+        lines.append("<code>" + "\n".join(block) + "</code>")
+    else:
+        lines.append("📋 <b>Open</b>  none")
+
+    if closed_rows:
+        lines += ["", f"📕 <b>Closed ({len(closed_rows)})</b>"]
+        block = []
+        for r in closed_rows:
+            coin = r["symbol"].replace("-USD", "")
+            reason = r.get("exit_reason") or ""
+            block.append(f"{coin:<4} in ${r['entry_price']:,.2f} → out "
+                         f"${r['exit_price']:,.2f}  {reason:<10} "
+                         f"{_m(r.get('realized_pnl_usd') or 0)}")
+        lines.append("<code>" + "\n".join(block) + "</code>")
+
+    # Realized sums ALL rows, not just closed ones — a half-sold position books
+    # its first leg while still open, so filtering to closed rows would
+    # under-report it. Same rule as the US track.
+    realized_usd = sum((r.get("realized_pnl_usd") or 0) for r in rows)
+    lines += ["", "💰 <b>P&L</b>", "<code>"
+              f"Realized    {_m(realized_usd)}\n"
+              f"Unrealized  {_m(unrealized_usd)}\n"
+              f"Total       {_m(realized_usd + unrealized_usd)}"
+              "</code>"]
+    if missing_price:
+        lines.append("<i>Unrealized leaves out the coins with no live price</i>")
+
+    if summary:
+        lines += ["", f"<i>{summary['entries']} shadow entries vs live "
+                      f"{summary['live_entries']} since {summary['since']} · "
+                      f"P&L needs months, not days</i>"]
+    lines.append("<code>/crypto for the live signals</code>")
+    telegram_bot.send("\n".join(lines))
+
+
 def _us10k_stats(rows: list[dict], base_usd: float) -> dict:
     """Realized performance of the track. Only exited rows count — an open
     position's mark-to-market is a quote, not a result."""
@@ -2166,6 +2282,7 @@ async def handle_telegram_command(text: str):
             "/algocheck — is the algo actually working? vs backtest\n\n"
             "<b>Signals</b>\n"
             "/crypto — current signal for BTC, ETH, SOL\n"
+            "/shadow — what the NO_RSI_CAP shadow rule bought, and its stops\n"
             "/signal AAPL — current signal for any ticker\n"
             "/scan — screen 70 stocks for watchlist candidates + wheel ideas\n"
             "/briefing — send the US pre-open briefing now\n"
@@ -2371,6 +2488,14 @@ async def handle_telegram_command(text: str):
         except Exception as e:
             logging.warning(f"/track error: {e}")
             telegram_bot.send(f"❌ Track fetch failed.\n<code>{e}</code>")
+
+    elif cmd == "/shadow":
+        telegram_bot.send("⏳ Fetching the crypto shadow track…")
+        try:
+            await _send_crypto_shadow()
+        except Exception as e:
+            logging.warning(f"/shadow error: {e}")
+            telegram_bot.send(f"❌ Shadow fetch failed.\n<code>{e}</code>")
 
     elif cmd == "/algocheck":
         telegram_bot.send("⏳ Checking the algo against backtest…")
