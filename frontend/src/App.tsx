@@ -267,10 +267,41 @@ export default function App() {
     }
   }, [])
 
+  // Poll only while the tab is actually visible. This interval is shorter than
+  // Render's 15-minute idle timer and used to keep firing when hidden, so any
+  // dashboard tab left open anywhere -- pinned on the PC, backgrounded on a
+  // phone -- was a second 24/7 keep-warm holding the free instance awake. That
+  // is half of what exhausted the free-hour quota on 2026-08-30.
   useEffect(() => {
     void refresh()
-    const interval = setInterval(() => void refresh(), AUTO_REFRESH_MS)
-    return () => clearInterval(interval)
+    let interval: number | undefined
+
+    const start = () => {
+      if (interval === undefined) {
+        interval = window.setInterval(() => void refresh(), AUTO_REFRESH_MS)
+      }
+    }
+    const stop = () => {
+      if (interval !== undefined) {
+        window.clearInterval(interval)
+        interval = undefined
+      }
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void refresh()  // coming back to a stale tab should show current data
+        start()
+      } else {
+        stop()
+      }
+    }
+
+    if (document.visibilityState === 'visible') start()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
   }, [refresh])
 
   const status = marketStatus()

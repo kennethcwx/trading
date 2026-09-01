@@ -576,6 +576,37 @@ def set_bot_commands() -> bool:
         return False
 
 
+def _api_call(method: str, payload: dict) -> bool:
+    if not TOKEN:
+        return False
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TOKEN}/{method}",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=8)
+        return True
+    except Exception as e:
+        logger.warning(f"Telegram {method} failed: {e}")
+        return False
+
+
+def set_webhook(url: str) -> bool:
+    """Point Telegram at our own URL so its delivery is what wakes the app.
+
+    Telegram refuses getUpdates while a webhook is registered (409 Conflict), so
+    this and get_updates() below are mutually exclusive -- which is why main.py
+    starts exactly one of them and calls delete_webhook() before falling back.
+    """
+    return _api_call("setWebhook", {"url": url, "allowed_updates": ["message"]})
+
+
+def delete_webhook() -> bool:
+    return _api_call("deleteWebhook", {})
+
+
 def get_updates(offset: int = 0, timeout: int = 20) -> list[dict]:
     if not TOKEN:
         return []

@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import uvicorn
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -11,7 +12,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -3119,7 +3120,23 @@ async def lifespan(app: FastAPI):
     sgx = asyncio.create_task(sgx_watcher())
     news_task = asyncio.create_task(news_watcher())
     holdings = asyncio.create_task(holdings_watcher())
-    listener = asyncio.create_task(telegram_command_listener())
+    # Telegram: webhook if one is configured, long-poll otherwise.
+    # The 20s long-poll below is what forced this free instance to stay awake
+    # 24/7 -- commands only arrive if the process is alive to go *ask* for
+    # them. A webhook inverts that: Telegram's delivery is the inbound request
+    # that wakes the app. Unset WEBHOOK_URL and everything behaves as before,
+    # so a missing env var degrades to today's behaviour rather than to dead
+    # commands.
+    webhook_url = os.getenv("WEBHOOK_URL", "").strip()
+    listener = None
+    if webhook_url:
+        telegram_bot.set_webhook(webhook_url)
+        logging.info("Telegram webhook registered — command polling disabled")
+    else:
+        # Clear any webhook Telegram still has on file, or getUpdates answers
+        # 409 Conflict forever and every command silently disappears.
+        telegram_bot.delete_webhook()
+        listener = asyncio.create_task(telegram_command_listener())
     briefing = asyncio.create_task(morning_briefing_task())
     sgx_briefing = asyncio.create_task(sgx_briefing_task())
     # Day summaries: US at 7:30 SGT Tue–Sat (Sun=6, Mon=0 skipped);
@@ -3135,7 +3152,8 @@ async def lifespan(app: FastAPI):
     crypto.cancel()
     news_task.cancel()
     holdings.cancel()
-    listener.cancel()
+    if listener is not None:
+        listener.cancel()
     briefing.cancel()
     us_summary.cancel()
     sgx_summary.cancel()
@@ -3168,6 +3186,62 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Telegram webhook ─────────────────────────────────────────────────────────
+# bus-bot has run this way since 2026-07-13. The dedupe below is its bug fix,
+# not speculation: Telegram redelivers any update that isn't acknowledged
+# quickly, and on a cold free instance that regularly meant the same command
+# ran four times ("/ping answers 4 times"). Ack first, work after.
+
+_tg_seen_ids: set[int] = set()
+_tg_seen_order: deque[int] = deque(maxlen=200)
+
+
+def _tg_is_duplicate(update_id: int | None) -> bool:
+    if update_id is None:
+        return False
+    if update_id in _tg_seen_ids:
+        return True
+    if len(_tg_seen_order) == _tg_seen_order.maxlen:
+        _tg_seen_ids.discard(_tg_seen_order[0])
+    _tg_seen_order.append(update_id)
+    _tg_seen_ids.add(update_id)
+    return False
+
+
+def _webhook_path_secret() -> str:
+    """The secret is the last path segment of WEBHOOK_URL, so there is one env
+    var to set and no way for the URL and the route to drift apart."""
+    url = os.getenv("WEBHOOK_URL", "").strip()
+    return url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+
+
+async def _run_telegram_command(text: str):
+    try:
+        await handle_telegram_command(text)
+    except Exception as e:
+        logging.warning(f"Telegram command {text!r} failed: {e}")
+
+
+@app.post("/tg/{secret}")
+async def telegram_webhook(secret: str, request: Request):
+    expected = _webhook_path_secret()
+    # Without a configured secret there is nothing to authenticate against, so
+    # the route stays shut rather than open.
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        data = await request.json()
+    except Exception:
+        return {"ok": True}
+    if _tg_is_duplicate(data.get("update_id")):
+        return {"ok": True}
+    text = ((data.get("message") or {}).get("text") or "").strip()
+    if text.startswith("/"):
+        # /scan runs for a minute; Telegram gives up waiting long before that.
+        asyncio.create_task(_run_telegram_command(text))
+    return {"ok": True}
 
 
 @app.get("/api/watchlist")
