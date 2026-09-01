@@ -37,15 +37,39 @@ _last_crypto_signals: dict[str, str] = {}
 
 # ── Daily summary event log ──────────────────────────────────────────────────
 # Every US/SGX signal event lands here (sent immediately or queued); the daily
-# summary tasks drain it. In-memory: a redeploy drops undelivered queue entries,
-# which is acceptable for a convenience digest — exits always send immediately.
-_event_log: list[dict] = []
+# summary tasks read it.
+#
+# This was a plain in-memory list, on the reasoning that a restart is rare and
+# losing a convenience digest is cheap. Neither half survived the move to a
+# sleeping instance: Render stops the process after 15 idle minutes, so the list
+# is now emptied roughly every half hour and a summary would report only what
+# the last few minutes happened to hold — nearly always nothing, on a digest
+# whose entire purpose is "what fired today". There are a handful of events a
+# day, so they live in the key-value store the scheduled pushes already use.
+_EVENT_LOG_STATE_KEY = "daily_summary_event_log"
+
+
+def _load_events() -> list[dict]:
+    try:
+        raw = db.get_state(_EVENT_LOG_STATE_KEY)
+        return json.loads(raw) if raw else []
+    except Exception as e:
+        logging.warning(f"Could not read event log: {e}")
+        return []
+
+
+def _save_events(events: list[dict]) -> None:
+    try:
+        db.set_state(_EVENT_LOG_STATE_KEY, json.dumps(events[-200:]))
+    except Exception as e:
+        logging.warning(f"Could not persist event log: {e}")
 
 
 def _log_event(market: str, text: str, sent: bool):
-    _event_log.append({"ts": datetime.now(SGT), "market": market, "sent": sent, "text": text})
-    if len(_event_log) > 200:
-        del _event_log[: len(_event_log) - 200]
+    events = _load_events()
+    events.append({"ts": datetime.now(SGT).isoformat(timespec="seconds"),
+                   "market": market, "sent": sent, "text": text})
+    _save_events(events)
 
 
 # telegram_bot.send() swallows its own exceptions and returns False, and no
@@ -64,11 +88,22 @@ def _note_send_failure(market: str, what: str) -> None:
     logging.error(f"Telegram delivery failed [{market}] {what}")
 
 
-def _drain_events(market: str) -> list[dict]:
-    kept = [e for e in _event_log if e["market"] != market]
-    drained = [e for e in _event_log if e["market"] == market]
-    _event_log[:] = kept
-    return drained
+def _read_events(market: str) -> list[dict]:
+    return [e for e in _load_events() if e["market"] == market]
+
+
+def _clear_events(market: str) -> None:
+    """Only ever called once a summary has actually reached Telegram. Draining
+    first — as the old code did — meant a dropped push threw the day's events
+    away, so the retry it triggered could only ever send an empty summary."""
+    _save_events([e for e in _load_events() if e["market"] != market])
+
+
+def _event_time(e: dict) -> str:
+    try:
+        return datetime.fromisoformat(e["ts"]).strftime("%H:%M")
+    except Exception:
+        return "--:--"
 
 
 # Watcher liveness — last time each watcher completed a scan pass (and, for the
@@ -80,6 +115,106 @@ _heartbeats: dict[str, str] = {}
 
 def _beat(name: str) -> None:
     _heartbeats[name] = datetime.now(SGT).isoformat(timespec="seconds")
+
+
+# ── Scheduled pushes ─────────────────────────────────────────────────────────
+# The daily jobs below follow weekly_algocheck_task's shape — poll, ask the
+# database whether this occurrence already went out, never hold a schedule
+# across a long sleep. See that task's docstring for the reasoning; what
+# follows is why every scheduled job now needs it rather than just the weekly
+# one.
+#
+# Keeping this instance awake around the clock cost the entire free-tier
+# budget: 754.92 hours against 750, and all three services were suspended on
+# 2026-08-30. The fix was to let it sleep — the keep-warm ping moved to 30
+# minutes, and Render stops a service after 15 minutes without an inbound
+# request. So the process is alive for roughly half of each hour and dies in
+# between, dozens of times a day.
+#
+# That inverts the assumption every one of these tasks was built on. Computing
+# "next 08:30" and sleeping until it is now a near-certain way to be killed
+# before arriving, and a catch-up that fires on startup with nothing recording
+# that it already ran is no longer an edge case — it is ~15 identical morning
+# briefings a weekday.
+
+# How often a daily job re-asks whether its push is due, and the worst case by
+# which a push lands after its scheduled minute. Shorter than the weekly job's
+# 10 minutes because the instance is only awake ~15 minutes at a stretch: a
+# poll interval near that length is a poll that may never run at all.
+SCHEDULE_POLL_MIN = 5
+
+
+def _last_daily(now: datetime, hour: int, minute: int,
+                skip_weekdays: tuple = ()) -> datetime:
+    """The most recent scheduled hh:mm at or before `now`.
+
+    Skipped weekdays are stepped over rather than reported as due, so a Monday
+    07:30 poll for a Tue–Sat job asks about Saturday's slot, not Sunday's.
+    """
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target > now:
+        target -= timedelta(days=1)
+    while target.weekday() in skip_weekdays:
+        target -= timedelta(days=1)
+    return target
+
+
+async def _scheduled_daily(name: str, state_key: str, market: str, tz,
+                           hour: int, minute: int, skip_weekdays: tuple,
+                           catchup: timedelta, send) -> None:
+    """Send one daily push at most once per scheduled day, across restarts.
+
+    `send(note)` must return whether the message reached Telegram. A push that
+    failed is never marked sent, so the next poll retries it until the catch-up
+    window closes — telegram_bot.send() swallows its exceptions and returns
+    False, so without this a dropped message looks exactly like a delivered one.
+    """
+    memo: str | None = None   # mirrors the row, so a healthy day costs no queries
+    await asyncio.sleep(30)
+    while True:
+        try:
+            now = datetime.now(tz)
+            due = _last_daily(now, hour, minute, skip_weekdays)
+            tag = due.strftime("%Y-%m-%d")
+            late = now - due
+            # Ordered cheapest-first: most polls fall outside the window or hit
+            # the memo, and never open a connection.
+            if late <= catchup and memo != tag:
+                if db.get_state(state_key) == tag:
+                    memo = tag
+                else:
+                    note = ""
+                    if late >= timedelta(minutes=SCHEDULE_POLL_MIN * 2):
+                        note = (f"<i>Catch-up — this was due "
+                                f"{due:%a %d %b %H:%M}.</i>")
+                    if await send(note):
+                        db.set_state(state_key, tag)
+                        memo = tag
+                    else:
+                        _note_send_failure(market, f"{name} for {tag}")
+        except Exception as e:
+            logging.warning(f"{name} error: {e}")
+        await asyncio.sleep(SCHEDULE_POLL_MIN * 60)
+
+
+def _last_of_hours(now: datetime, hours: tuple) -> datetime:
+    """The most recent of several daily on-the-hour slots at or before `now`."""
+    slots = [now.replace(hour=h, minute=0, second=0, microsecond=0)
+             for h in sorted(hours)]
+    past = [t for t in slots if t <= now]
+    return past[-1] if past else slots[-1] - timedelta(days=1)
+
+
+BRIEFING_STATE_KEY = "morning_briefing_last_sent"
+SGX_BRIEFING_STATE_KEY = "sgx_briefing_last_sent"
+STARTUP_STATE_KEY = "startup_notice_last_commit"
+# SGT slots for the crypto recap. The cadence is unchanged at 8-hourly (cut
+# from 4 on 2026-08-27); only its anchor moves, from a counter to the clock.
+CRYPTO_DIGEST_HOURS = (0, 8, 16)
+CRYPTO_DIGEST_STATE_KEY = "crypto_digest_last_sent"
+# Half the gap between slots, so a late recap can never collide with the next.
+CRYPTO_DIGEST_CATCHUP_H = 4
+_crypto_digest_tag: str | None = None
 
 
 def _us_alert_window() -> bool:
@@ -975,15 +1110,9 @@ async def _build_crypto_snapshot(regime: dict, sgd_to_usd: float) -> list[dict]:
 
 async def crypto_watcher():
     """8-hour digest for all crypto coins. Immediate alert on SELL/stop-loss for held positions."""
+    global _crypto_digest_tag
     await asyncio.sleep(45)
     loop = asyncio.get_event_loop()
-    cycle = 0
-    # 2026-08-27: cut from 4h to 8h. At 6 digests/day the pulse was ~60% of every
-    # scheduled push the bot sent, and most of them repeated the previous one --
-    # BTC's 200 SMA gate was off from 2025-11-03 to 2026-08-18, so nine of those
-    # months could not produce an entry at all. Actionable BUYs and exits on held
-    # positions still fire immediately below; only the recap is thinned.
-    DIGEST_EVERY = 16  # 16 × 30 min = 8 hours
 
     while True:
         try:
@@ -1029,11 +1158,36 @@ async def crypto_watcher():
             except Exception as e:
                 logging.warning(f"crypto shadow track pass failed: {e}")
 
-            # Every 8 hours: send full digest
-            cycle += 1
-            if cycle >= DIGEST_EVERY:
-                cycle = 0
-                telegram_bot.send(telegram_bot.format_crypto_digest(rows, sgd_to_usd, shadow))
+            # Every 8 hours: send full digest.
+            #
+            # 2026-08-27: cut from 4h to 8h. At 6 digests/day the pulse was ~60%
+            # of every scheduled push the bot sent, and most repeated the
+            # previous one -- BTC's 200 SMA gate was off from 2025-11-03 to
+            # 2026-08-18, so nine of those months could not produce an entry at
+            # all. Actionable BUYs and exits on held positions still fire
+            # immediately above; only the recap is thinned.
+            #
+            # That thinning was counted in loop passes -- 16 x 30 min -- and the
+            # counter lived in memory. Once the instance began sleeping it reset
+            # on every restart and never reached 16, so the recap stopped
+            # sending entirely and silently. Anchored to the wall clock now,
+            # with the same database memo the other scheduled pushes use.
+            try:
+                now_sgt = datetime.now(SGT)
+                due = _last_of_hours(now_sgt, CRYPTO_DIGEST_HOURS)
+                tag = due.strftime("%Y-%m-%d %H")
+                if (now_sgt - due <= timedelta(hours=CRYPTO_DIGEST_CATCHUP_H)
+                        and _crypto_digest_tag != tag):
+                    if db.get_state(CRYPTO_DIGEST_STATE_KEY) == tag:
+                        _crypto_digest_tag = tag
+                    elif telegram_bot.send(
+                            telegram_bot.format_crypto_digest(rows, sgd_to_usd, shadow)):
+                        db.set_state(CRYPTO_DIGEST_STATE_KEY, tag)
+                        _crypto_digest_tag = tag
+                    else:
+                        _note_send_failure("CRYPTO", f"8-hour digest for {tag}")
+            except Exception as e:
+                logging.warning(f"crypto digest error: {e}")
 
             _beat("crypto_scan")
 
@@ -2587,7 +2741,10 @@ async def run_screener_scan() -> dict:
     }
 
 
-async def send_morning_briefing():
+async def send_morning_briefing(note: str = "") -> bool:
+    """Returns whether the briefing reached Telegram, so the scheduler can retry
+    a dropped push instead of marking the day done. `note` carries the
+    scheduler's catch-up line."""
     loop = asyncio.get_event_loop()
     SGT = ZoneInfo("Asia/Singapore")
 
@@ -2649,12 +2806,18 @@ async def send_morning_briefing():
         actionable_signals=actionable_signals,
         watch_signals=watch_signals,
     )
-    telegram_bot.send(msg)
+    if note:
+        msg += f"\n\n{note}"
+    ok = telegram_bot.send(msg)
 
     # Run full screener scan and send separately so it doesn't get cut off
     scan = await run_screener_scan()
     scan_msg = telegram_bot.format_scan_results(scan, tracked=db.get_watchlist())
-    telegram_bot.send(scan_msg)
+    if not telegram_bot.send(scan_msg):
+        _note_send_failure("US", "morning briefing screener scan")
+    # The day is marked on the briefing itself. A dropped scan is surfaced in
+    # /health rather than replaying the whole briefing to recover it.
+    return ok
 
 
 def _holdings_entry_hint(a: dict, signal_action: str) -> str:
@@ -2773,7 +2936,8 @@ async def holdings_watcher():
         await asyncio.sleep(15 * 60)
 
 
-async def send_sgx_morning_briefing():
+async def send_sgx_morning_briefing(note: str = "") -> bool:
+    """Returns whether the briefing reached Telegram; see send_morning_briefing."""
     loop = asyncio.get_event_loop()
     now_sgt = datetime.now(SGT)
     regime = await loop.run_in_executor(None, get_market_regime)
@@ -2877,41 +3041,39 @@ async def send_sgx_morning_briefing():
         lines.extend(blocked)
 
     lines += ["", "<i>Doesn't account for SG public holidays · verify before trading</i>"]
+    if note:
+        lines += ["", note]
 
-    telegram_bot.send("\n".join(lines))
+    return telegram_bot.send("\n".join(lines))
 
 
 async def sgx_briefing_task():
-    # Catch-up: if backend starts between 8:30 AM and market open (9:00 AM SGT), send now
-    try:
-        now_sgt = datetime.now(SGT)
-        cutoff = now_sgt.replace(hour=8, minute=30, second=0, microsecond=0)
-        market_open = now_sgt.replace(hour=9, minute=0, second=0, microsecond=0)
-        if now_sgt.weekday() < 5 and cutoff <= now_sgt < market_open:
-            await send_sgx_morning_briefing()
-    except Exception as e:
-        logging.warning(f"SGX briefing catch-up error: {e}")
+    """SGX pre-open briefing -- 08:30 SGT, weekdays.
 
-    while True:
-        try:
-            now_sgt = datetime.now(SGT)
-            target = now_sgt.replace(hour=8, minute=30, second=0, microsecond=0)
-            if now_sgt >= target:
-                target += timedelta(days=1)
-            while target.weekday() >= 5:
-                target += timedelta(days=1)
-            await asyncio.sleep((target - now_sgt).total_seconds())
-            await send_sgx_morning_briefing()
-        except Exception as e:
-            logging.warning(f"SGX briefing error: {e}")
-            await asyncio.sleep(60)
+    The catch-up window stops at the 09:00 open on purpose: this briefing quotes
+    pre-open levels, and one that arrives after the market has moved is worse
+    than one that never came. Thirty minutes is still reliable while the
+    instance sleeps -- the window is exactly one keep-warm period long, so it
+    always contains a full wake, and the job polls several times inside it.
+    """
+    await _scheduled_daily(
+        name="SGX briefing", state_key=SGX_BRIEFING_STATE_KEY, market="SGX",
+        tz=SGT, hour=8, minute=30, skip_weekdays=(5, 6),
+        catchup=timedelta(minutes=30),
+        send=send_sgx_morning_briefing,
+    )
 
 
-async def _send_daily_summary(market: str):
-    """Drain the event log for one market and send a day summary: what fired
-    (sent immediately or queued outside the alert window) + open positions."""
+async def _send_daily_summary(market: str, note: str = "") -> bool:
+    """Send one market's day summary: what fired (sent immediately or queued
+    outside the alert window) + open positions.
+
+    Returns whether the day is done with, so the scheduler can mark it sent. A
+    day with nothing to report counts as done; a dropped push does not, and its
+    events are left in the log for the retry to pick up.
+    """
     loop = asyncio.get_event_loop()
-    events = _drain_events(market)
+    events = _read_events(market)
 
     rows = db.fetch("SELECT * FROM trades WHERE exit_price IS NULL ORDER BY entry_date DESC")
     if market == "SGX":
@@ -2921,7 +3083,7 @@ async def _send_daily_summary(market: str):
                      if r["symbol"] not in SGX_WATCHLIST and r["symbol"] not in CRYPTO_WATCHLIST]
 
     if not events and not positions:
-        return   # nothing to say — don't send an empty digest
+        return True   # nothing to say — don't send an empty digest, but the day is done
 
     regime = await loop.run_in_executor(None, get_market_regime)
     if market == "SGX":
@@ -2938,7 +3100,7 @@ async def _send_daily_summary(market: str):
         lines.append("Signals (✓ sent · ⏸ queued):")
         for e in events:
             mark = "✓" if e["sent"] else "⏸"
-            lines.append(f"  {mark} {e['ts'].strftime('%H:%M')}  {e['text']}")
+            lines.append(f"  {mark} {_event_time(e)}  {e['text']}")
     else:
         lines.append("No signals fired.")
 
@@ -2958,26 +3120,31 @@ async def _send_daily_summary(market: str):
         lines.append("")
         lines.append("⏸ queued entries are re-checked in tonight's pre-open briefing — only act if still valid.")
 
-    telegram_bot.send("\n".join(lines))
+    if note:
+        lines += ["", note]
+
+    ok = telegram_bot.send("\n".join(lines))
+    if ok:
+        _clear_events(market)
+    return ok
 
 
 async def daily_summary_task(market: str, hour: int, minute: int, skip_weekdays: tuple):
     """Send the day summary at a fixed SGT time, skipping non-session days.
-    US: 7:30 SGT Tue–Sat (session ends ~4–5 AM SGT). SGX: 17:45 SGT Mon–Fri."""
-    await asyncio.sleep(60)
-    while True:
-        try:
-            now = datetime.now(SGT)
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            while target.weekday() in skip_weekdays:
-                target += timedelta(days=1)
-            await asyncio.sleep((target - datetime.now(SGT)).total_seconds())
-            await _send_daily_summary(market)
-        except Exception as e:
-            logging.warning(f"{market} daily summary error: {e}")
-            await asyncio.sleep(60)
+    US: 7:30 SGT Tue-Sat (session ends ~4-5 AM SGT). SGX: 17:45 SGT Mon-Fri.
+
+    This was the worst-affected of the four: a pure sleep-to-target with no
+    persistence and no catch-up at all, so once the instance started being
+    stopped every half hour the summaries simply never fired. A recap is still
+    worth reading late, so the window here is generous.
+    """
+    await _scheduled_daily(
+        name=f"{market} daily summary",
+        state_key=f"daily_summary_last_sent_{market}",
+        market=market, tz=SGT, hour=hour, minute=minute,
+        skip_weekdays=skip_weekdays, catchup=timedelta(hours=6),
+        send=lambda note: _send_daily_summary(market, note),
+    )
 
 
 # How often the weekly task re-asks whether the verdict is due. Also the worst
@@ -3055,32 +3222,20 @@ async def weekly_algocheck_task(weekday: int = 5, hour: int = 9, minute: int = 0
 
 
 async def morning_briefing_task():
-    # Catch-up: if the backend starts after 8:30 AM on a weekday and before
-    # market close (4 PM ET), the briefing was missed — send it now.
-    try:
-        now_et = datetime.now(ET)
-        cutoff = now_et.replace(hour=8, minute=30, second=0, microsecond=0)
-        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-        if now_et.weekday() < 5 and cutoff <= now_et < market_close:
-            logging.info("Morning briefing: sending catch-up (backend started after 8:30 AM ET)")
-            await send_morning_briefing()
-    except Exception as e:
-        logging.warning(f"Morning briefing catch-up error: {e}")
+    """US pre-open briefing -- 08:30 ET, weekdays.
 
-    while True:
-        try:
-            now_et = datetime.now(ET)
-            target = now_et.replace(hour=8, minute=30, second=0, microsecond=0)
-            if now_et >= target:
-                target += timedelta(days=1)
-            # Skip straight to Monday if target lands on a weekend
-            while target.weekday() >= 5:
-                target += timedelta(days=1)
-            await asyncio.sleep((target - now_et).total_seconds())
-            await send_morning_briefing()
-        except Exception as e:
-            logging.warning(f"Morning briefing error: {e}")
-            await asyncio.sleep(60)
+    The old catch-up fired on any startup between 08:30 and the 16:00 close and
+    recorded nothing to say it had already gone out, which was harmless while
+    restarts were rare. Under 30-minute restarts it is about fifteen identical
+    briefings every weekday. The window below keeps that same 08:30-to-close
+    bound; what is new is that it only sends once inside it.
+    """
+    await _scheduled_daily(
+        name="morning briefing", state_key=BRIEFING_STATE_KEY, market="US",
+        tz=ET, hour=8, minute=30, skip_weekdays=(5, 6),
+        catchup=timedelta(hours=7, minutes=30),   # 08:30 -> the 16:00 ET close
+        send=send_morning_briefing,
+    )
 
 
 async def telegram_command_listener():
@@ -3146,7 +3301,16 @@ async def lifespan(app: FastAPI):
     # Weekly algo verdict: Saturday 09:00 SGT, after Friday's US close settles
     algocheck = asyncio.create_task(weekly_algocheck_task())
     telegram_bot.set_bot_commands()
-    telegram_bot.send(telegram_bot.format_startup(db.get_watchlist()))
+    # One "online" notice per deploy, not per process start. Render stops this
+    # instance after 15 idle minutes and the keep-warm ping restarts it, so an
+    # unconditional startup push is ~48 notifications a day that say nothing.
+    try:
+        commit = os.getenv("RENDER_GIT_COMMIT", "")[:7] or "local"
+        if db.get_state(STARTUP_STATE_KEY) != commit:
+            telegram_bot.send(telegram_bot.format_startup(db.get_watchlist()))
+            db.set_state(STARTUP_STATE_KEY, commit)
+    except Exception as e:
+        logging.warning(f"startup notice error: {e}")
     yield
     watcher.cancel()
     crypto.cancel()
