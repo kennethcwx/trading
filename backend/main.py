@@ -24,7 +24,7 @@ import telegram_bot
 import news
 from analysis import get_market_regime, get_crypto_regime, get_sgx_regime, get_ticker_analysis, get_fundamentals, get_relative_strength, get_sector_etf_status, get_options_premium, get_bull_put_spread, get_return_since, get_holding_events, invalidate_cache
 from signals import generate_signal, calculate_position_size
-from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, CRYPTO_SHADOW_ENABLED, CRYPTO_SHADOW_TRACK, CRYPTO_SHADOW_VARIANT, CRYPTO_SHADOW_PORTFOLIO_SGD, CRYPTO_SHADOW_START, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, SGX_HOLDINGS, HOLDINGS_MOVE_ALERT_PCT, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, MAX_SECTOR_PCT, TICKER_SECTORS, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO, US10K_ENABLED, US10K_TRACK, US10K_PORTFOLIO_SGD, US10K_VARIANT, US10K_START, US10K_EXPECT_CAGR, US10K_EXPECT_MAXDD, US10K_EXPECT_PER_TRADE
+from config import PORTFOLIO_SIZE_SGD, LONGTERM_WATCHLIST, QUANTUM_WATCHLIST, COVERED_CALLS_WATCHLIST, SCREENER_UNIVERSE, SPREAD_UNIVERSE, SPREAD_WIDTH, SPREAD_ACCOUNT_SGD, CRYPTO_WATCHLIST, CRYPTO_POSITION_SGD, CRYPTO_SHADOW_ENABLED, CRYPTO_SHADOW_TRACK, CRYPTO_SHADOW_VARIANT, CRYPTO_SHADOW_PORTFOLIO_SGD, CRYPTO_SHADOW_START, TRAILING_TRIGGER, TRAILING_STOP_PCT, SGX_WATCHLIST, SGX_PORTFOLIO_SGD, SGX_HOLDINGS, HOLDINGS_MOVE_ALERT_PCT, RISK_PER_TRADE_PCT, MAX_POSITION_PCT, MAX_SECTOR_PCT, TICKER_SECTORS, NEWS_MOVE_THRESHOLD_PCT, NEWS_HEADLINES_PER_TICKER, STOP_ATR_MULT, STOP_MAX_PCT, PROFIT_RATIO, US10K_ENABLED, US10K_TRACK, US10K_PORTFOLIO_SGD, US10K_VARIANT, US10K_START, US10K_EXPECT_CAGR, US10K_EXPECT_MAXDD, US10K_EXPECT_PER_TRADE, US10K_MIN_CASH_PCT, SGX_ENABLED
 
 logging.basicConfig(level=logging.INFO)
 
@@ -468,8 +468,8 @@ def _run_us10k_track(stock_data: list[dict], regime: dict, sgd_to_usd: float,
         for r in open_rows
     }
     by_symbol = {r["symbol"]: r for r in open_rows}
-    equity_sgd = _us10k_equity_sgd(sgd_to_usd)
     today = datetime.now(SGT).strftime("%Y-%m-%d")
+    entry_candidates: list[tuple[float, str, dict, dict]] = []
 
     for d in stock_data:
         symbol = d["symbol"]
@@ -521,23 +521,12 @@ def _run_us10k_track(stock_data: list[dict], regime: dict, sgd_to_usd: float,
                     except Exception as e:
                         logging.warning(f"us10k: gated-signal log failed for {symbol}: {e}")
                 continue
-            size = calculate_position_size(
-                equity_sgd, price, d["analysis"]["stop_loss"], sgd_to_usd, size_mult,
-            )
-            if not size or size["shares"] <= 0:
-                continue
-            try:
-                db.open_paper_trade(
-                    US10K_TRACK, symbol, US10K_VARIANT, size["shares"], today, price,
-                    d["analysis"].get("stop_loss"), d["analysis"].get("profit_target"),
-                    "; ".join(sig.get("reasons") or [])[:400],
-                )
-                logging.info(
-                    f"us10k: OPEN {symbol} {size['shares']} @ ${price:.2f} "
-                    f"stop ${d['analysis'].get('stop_loss') or 0:.2f}"
-                )
-            except Exception as e:
-                logging.warning(f"us10k: open failed for {symbol}: {e}")
+            # Collected, not opened. Capital is shared, so entries cannot be
+            # funded in whatever order the batch happens to arrive in — when the
+            # cash floor binds, iteration order would silently decide which
+            # signals get taken. backtest.py funds by RS rank, best first, and
+            # the whole point of this track is to be the same account.
+            entry_candidates.append((rs_rank if rs_rank is not None else 0.0, symbol, d, sig))
             continue
 
         # ── Exits ──────────────────────────────────────────────────────────
@@ -572,6 +561,113 @@ def _run_us10k_track(stock_data: list[dict], regime: dict, sgd_to_usd: float,
                     logging.info(f"us10k: TRAIL CLOSE {symbol} @ ${price:.2f}")
         except Exception as e:
             logging.warning(f"us10k: exit handling failed for {symbol}: {e}")
+
+    _fund_us10k_entries(entry_candidates, stock_data, sgd_to_usd, size_mult, today)
+
+
+def _fund_us10k_entries(candidates: list[tuple[float, str, dict, dict]],
+                        stock_data: list[dict], sgd_to_usd: float,
+                        size_mult: float, today: str) -> None:
+    """Open as many of this pass's BUYs as the account can actually pay for.
+
+    Sizing already caps a single position at MAX_POSITION_PCT of equity. What was
+    missing is the other half: nothing subtracted an open position from the money
+    available for the next one. Equity came from base + realized, which does not
+    move when a position opens, so every candidate was sized against the full
+    account and the track's ceiling was MAX_POSITION_PCT x len(watchlist) — 80% at
+    eight symbols, 250% at twenty-five.
+
+    Mirrors backtest.py's portfolio sim: mark-to-market equity, a cash floor, and
+    funding in RS-rank order so the best-ranked signal is served first when the
+    floor binds. Positions that cannot be afforded are skipped and counted, which
+    is what the sim does and is itself a finding — 'skipped for capital' is how
+    the SGX research concluded board lots were the real constraint there.
+    """
+    if not candidates:
+        return
+
+    # Re-read rather than reuse the pre-loop snapshot: exits ran in this same pass
+    # and the cash they freed is spendable now.
+    try:
+        open_rows = db.get_open_paper_trades(US10K_TRACK)
+    except Exception as e:
+        logging.warning(f"us10k: cannot read open trades, funding no entries: {e}")
+        return
+
+    price_by_symbol = {
+        d["symbol"]: (d.get("analysis") or {}).get("price") for d in stock_data
+    }
+
+    # Equity the way the sim measures it: cash plus what the open positions are
+    # worth today, not what they cost. Falling back to entry price only when a
+    # symbol is missing from this batch keeps a stale quote from inventing equity.
+    cost_basis_usd = sum(r["shares"] * r["entry_price"] for r in open_rows)
+    market_usd = sum(
+        r["shares"] * (price_by_symbol.get(r["symbol"]) or r["entry_price"])
+        for r in open_rows
+    )
+    # base + realized, in USD — which is exactly cash plus what the open
+    # positions cost, so subtracting the cost basis leaves spendable cash.
+    cash_usd = _us10k_equity_sgd(sgd_to_usd) * sgd_to_usd - cost_basis_usd
+    equity_usd = cash_usd + market_usd
+    if equity_usd <= 0:
+        logging.warning("us10k: equity is not positive, funding no entries")
+        return
+
+    held = {r["symbol"] for r in open_rows}
+    skipped_capital = 0
+
+    for _rank, symbol, d, sig in sorted(candidates, key=lambda c: -c[0]):
+        if symbol in held:
+            continue  # opened earlier in this same pass, or already held
+        price = (d.get("analysis") or {}).get("price")
+        stop = (d.get("analysis") or {}).get("stop_loss")
+        if not price or price <= 0:
+            continue
+
+        size = calculate_position_size(
+            equity_usd / sgd_to_usd, price, stop, sgd_to_usd, size_mult,
+        )
+        if not size:
+            continue
+        pos_usd = size["position_value_usd"]
+
+        floor_usd = equity_usd * US10K_MIN_CASH_PCT
+        if cash_usd - pos_usd < floor_usd:
+            pos_usd = cash_usd - floor_usd
+        # Below a twentieth of one share is not a position, it is a rounding
+        # artifact. Same threshold the sim uses.
+        if pos_usd <= 0 or pos_usd < price * 0.05:
+            skipped_capital += 1
+            continue
+
+        shares = round(pos_usd / price, 3)
+        if shares <= 0:
+            skipped_capital += 1
+            continue
+
+        try:
+            db.open_paper_trade(
+                US10K_TRACK, symbol, US10K_VARIANT, shares, today, price,
+                stop, (d.get("analysis") or {}).get("profit_target"),
+                "; ".join(sig.get("reasons") or [])[:400],
+            )
+        except Exception as e:
+            logging.warning(f"us10k: open failed for {symbol}: {e}")
+            continue
+
+        cash_usd -= shares * price
+        held.add(symbol)
+        logging.info(
+            f"us10k: OPEN {symbol} {shares} @ ${price:.2f} stop ${stop or 0:.2f} "
+            f"— cash left ${cash_usd:.0f} of ${equity_usd:.0f} equity"
+        )
+
+    if skipped_capital:
+        logging.info(
+            f"us10k: {skipped_capital} entr{'y' if skipped_capital == 1 else 'ies'} "
+            f"skipped for capital (cash floor {US10K_MIN_CASH_PCT:.0%})"
+        )
 
 
 def _sector_note(symbol: str, market: str, new_value_sgd: float | None,
@@ -3189,14 +3285,21 @@ def _scheduled_pushes() -> list[tuple[str, str, str]]:
     heartbeats, and the mark is the same one the scheduler consults before
     sending. If it is set for today, today's push is done and cannot repeat.
     """
-    return [
+    pushes = [
         ("US briefing", BRIEFING_STATE_KEY, "08:30 ET, weekdays"),
-        ("SGX briefing", SGX_BRIEFING_STATE_KEY, "08:30 SGT, weekdays"),
         ("US summary", "daily_summary_last_sent_US", "07:30 SGT, Tue-Sat"),
-        ("SGX summary", "daily_summary_last_sent_SGX", "17:45 SGT, weekdays"),
         ("Crypto recap", CRYPTO_DIGEST_STATE_KEY, "00:00/08:00/16:00 SGT"),
         ("Weekly verdict", ALGOCHECK_STATE_KEY, "Sat 09:00 SGT"),
     ]
+    # Listed only while SGX runs. A shelved push shows a stale mark and then never
+    # moves, which reads exactly like a broken scheduler — the failure this card
+    # exists to make visible.
+    if SGX_ENABLED:
+        pushes[1:1] = [
+            ("SGX briefing", SGX_BRIEFING_STATE_KEY, "08:30 SGT, weekdays"),
+        ]
+        pushes.append(("SGX summary", "daily_summary_last_sent_SGX", "17:45 SGT, weekdays"))
+    return pushes
 
 # Mirrors the app_state row so a healthy week costs no database round-trips.
 _algocheck_sent_tag: str | None = None
@@ -3315,7 +3418,11 @@ async def lifespan(app: FastAPI):
     watcher = asyncio.create_task(signal_watcher())
     rs_refresher = asyncio.create_task(rs_rank_refresher())
     crypto = asyncio.create_task(crypto_watcher())
-    sgx = asyncio.create_task(sgx_watcher())
+    # Shelved 2026-09-04 — see SGX_ENABLED in config.py for the evidence. The
+    # holdings watcher below is deliberately outside the flag: D05 and O39 are
+    # shares he actually owns, and not trading a strategy is not a reason to stop
+    # watching real positions.
+    sgx = asyncio.create_task(sgx_watcher()) if SGX_ENABLED else None
     news_task = asyncio.create_task(news_watcher())
     holdings = asyncio.create_task(holdings_watcher())
     # Telegram: webhook if one is configured, long-poll otherwise.
@@ -3336,11 +3443,12 @@ async def lifespan(app: FastAPI):
         telegram_bot.delete_webhook()
         listener = asyncio.create_task(telegram_command_listener())
     briefing = asyncio.create_task(morning_briefing_task())
-    sgx_briefing = asyncio.create_task(sgx_briefing_task())
+    sgx_briefing = asyncio.create_task(sgx_briefing_task()) if SGX_ENABLED else None
     # Day summaries: US at 7:30 SGT Tue–Sat (Sun=6, Mon=0 skipped);
     # SGX at 17:45 SGT Mon–Fri (Sat=5, Sun=6 skipped)
     us_summary = asyncio.create_task(daily_summary_task("US", 7, 30, (6, 0)))
-    sgx_summary = asyncio.create_task(daily_summary_task("SGX", 17, 45, (5, 6)))
+    sgx_summary = (asyncio.create_task(daily_summary_task("SGX", 17, 45, (5, 6)))
+                   if SGX_ENABLED else None)
     # Weekly algo verdict: Saturday 09:00 SGT, after Friday's US close settles
     algocheck = asyncio.create_task(weekly_algocheck_task())
     telegram_bot.set_bot_commands()
@@ -3363,7 +3471,9 @@ async def lifespan(app: FastAPI):
         listener.cancel()
     briefing.cancel()
     us_summary.cancel()
-    sgx_summary.cancel()
+    for task in (sgx, sgx_briefing, sgx_summary):
+        if task is not None:
+            task.cancel()
     algocheck.cancel()
 
 

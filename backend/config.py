@@ -118,6 +118,22 @@ IBKR_CLIENT_ID = 1
 # Expanded 8→27 liquid STI names 2026-07-13: the strategy's SGX edge only
 # appears with breadth (backtest: +6.5% CAGR on 27 names vs +0.3% on 8 with
 # the same logic — too few concurrent setups to compound on a narrow list).
+# SGX is shelved as of 2026-09-04 — scheduled scanning, alerts, briefings and
+# daily summaries are off. The watchlist and the code stay so this is one flag to
+# reverse, and the real-holdings monitor for SGX_HOLDINGS (D05/O39) is deliberately
+# NOT gated on this: those are shares he actually owns and still want watching.
+#
+# Why: research/phase3-sgx-cost-breakeven-2026-07-19.md found the ceiling, not the
+# costs, is what kills it. Even at a nearly free 0.05% slippage SGX D makes +3.4%/yr
+# against +8.3% for the same logic on US, because S$5k against 100-share board lots
+# skips ~717-759 signals — capital granularity, which no amount of tuning fixes at
+# this account size. Break-even is ~0.35% slippage and that estimate is optimistic
+# (per-order minimums are not modelled). The decision rule needed ~5 measured fills
+# and got 0 in three weeks from 11 fillable alerts, so the measurement was never
+# going to arrive either. Shelving, not narrowing: the same research refuted the
+# reduced universe as a fallback (16-18 trades in five years, ±0.1% CAGR).
+SGX_ENABLED = False
+
 SGX_WATCHLIST = [
     "D05", "O39", "U11",                              # banks
     "A17U", "C38U", "ME8U", "M44U", "N2IU", "AJBU", "BUOU",   # REITs
@@ -150,6 +166,15 @@ US10K_START = "2026-08-05"
 US10K_EXPECT_CAGR = 0.079        # +7.9% CAGR
 US10K_EXPECT_MAXDD = -0.076      # -7.6% max drawdown
 US10K_EXPECT_PER_TRADE = 0.0196  # +1.96% per trade, pooled over 283 legs
+# Cash the track must leave undeployed, as a fraction of equity. Mirrors
+# backtest.py's PF_MIN_CASH_PCT, and exists for the same reason: without a shared
+# cash pool the track sizes every entry off an equity figure that never shrinks as
+# positions open, so its maximum deployment is 10% x however many symbols are on
+# the watchlist. At 8 names that was 80% and the flaw could not be reached; the
+# widening to 25 on 2026-09-04 made the ceiling 250% of notional. A track that can
+# deploy capital it does not have is not simulating this account, and none of its
+# CAGR or drawdown numbers can be compared with the research.
+US10K_MIN_CASH_PCT = 0.10
 
 # Sector membership for the MAX_SECTOR_PCT concentration check on BUY alerts.
 # Static for the same reason as TICKER_NAMES: no network call on the alert path.

@@ -78,11 +78,28 @@ declared = {
     and k not in ("STARTUP_STATE_KEY", "_EVENT_LOG_STATE_KEY")
 }
 declared |= {"daily_summary_last_sent_US", "daily_summary_last_sent_SGX"}
+# SGX was shelved on 2026-09-04. Its pushes are not scheduled, so listing them would
+# show a mark that never moves — indistinguishable from a scheduler that has died.
+if not main.SGX_ENABLED:
+    declared -= {"sgx_briefing_last_sent", "daily_summary_last_sent_SGX"}
 missing = declared - registry_keys
 check(f"every scheduled-push key is listed ({len(registry_keys)} of {len(declared)})", not missing)
 check(f"nothing invented that no scheduler writes ({sorted(registry_keys - declared)})",
       not (registry_keys - declared))
 check("each entry says when it is due", all(due for _n, _k, due in main._scheduled_pushes()))
+# Both directions, so the flag is proven to drive the card rather than assumed to.
+_flag = main.SGX_ENABLED
+try:
+    main.SGX_ENABLED = True
+    on = {k for _l, k, _d in main._scheduled_pushes()}
+    main.SGX_ENABLED = False
+    off = {k for _l, k, _d in main._scheduled_pushes()}
+finally:
+    main.SGX_ENABLED = _flag
+sgx_keys = {"sgx_briefing_last_sent", "daily_summary_last_sent_SGX"}
+check("enabling SGX puts its pushes on the card", sgx_keys <= on)
+check("shelving SGX takes them off", not (sgx_keys & off))
+check("and leaves the other four alone", on - sgx_keys == off)
 
 
 print("\n[2] /api/schedules reports what completed and when it was marked")
@@ -149,10 +166,12 @@ check(f"a card was sent ({len(sent)})", len(sent) == 1)
 check("it has a scheduled-pushes section", "Scheduled pushes" in card)
 check("it names each push", all(label in card for label, _k, _d in main._scheduled_pushes()))
 check("today's briefing is flagged as done today", "2026-09-04 OK" in card)
-# The negative half: a tag from yesterday must NOT be dressed up as today's.
-sgx_line = next((ln for ln in card.split("\n") if ln.startswith("SGX summary")), "")
-check(f"yesterday's SGX summary is not flagged as today ({sgx_line.strip()!r})",
-      "2026-09-03" in sgx_line and "OK" not in sgx_line)
+# The negative half: a mark that is not today's must NOT be dressed up as one.
+# Uses the weekly verdict because SGX, whose summary used to carry this check,
+# is shelved and no longer on the card.
+stale = next((ln for ln in card.split("\n") if ln.startswith("Weekly verdict")), "")
+check(f"a mark that is not from today is not flagged ({stale.strip()!r})",
+      "2026-W35" in stale and "OK" not in stale)
 check("a push that never ran shows a dash", "Crypto recap   —" in card)
 check("the regime failure did not lose the card", "Backend Health" in card)
 
