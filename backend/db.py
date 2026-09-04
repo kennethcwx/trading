@@ -531,6 +531,24 @@ def get_state(key: str) -> str | None:
     return row["value"] if row else None
 
 
+def get_state_rows() -> dict[str, dict]:
+    """Every scheduled-push mark at once, keyed by state key.
+
+    One query rather than one per key: Neon opens a fresh connection for each
+    call, so asking six times costs six round trips for six small strings.
+
+    `updated_at` is the half that matters for diagnosis. `value` says which day
+    a push was last completed for; `updated_at` says when that was actually
+    written, which is the only record of when the message really went out that
+    outlives a restart.
+    """
+    rows = fetch("SELECT key, value, updated_at FROM app_state")
+    return {
+        r["key"]: {"value": r["value"], "updated_at": str(r["updated_at"]) if r["updated_at"] else None}
+        for r in rows
+    }
+
+
 def set_state(key: str, value: str) -> None:
     conn = get_conn()
     cur = conn.cursor()

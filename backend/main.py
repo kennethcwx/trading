@@ -2400,6 +2400,29 @@ async def _send_health():
         "<code>" + "\n".join(hb_rows) + "</code>\n"
         "<i>— means no pass since the last restart</i>"
     )
+    # The heartbeats above are in-memory, so a wake shows them empty and they
+    # cannot say whether this morning's briefing went out. These marks are rows
+    # and outlive the restart; a tag for today means today's push is done and
+    # the scheduler will not send it again.
+    try:
+        rows = await loop.run_in_executor(None, db.get_state_rows)
+        today = now.strftime("%Y-%m-%d")
+        push_rows = []
+        for label, key, _due in _scheduled_pushes():
+            tag = (rows.get(key) or {}).get("value")
+            if not tag:
+                push_rows.append(f"{label:<15}—")
+            else:
+                mark = "OK" if tag == today else "  "
+                push_rows.append(f"{label:<15}{tag} {mark}")
+        msg += (
+            "\n\n<b>Scheduled pushes</b>\n"
+            "<code>" + "\n".join(push_rows) + "</code>\n"
+            f"<i>Last day each one completed; OK = today ({today})</i>"
+        )
+    except Exception as e:
+        logging.warning(f"/health schedule read skipped: {e}")
+        msg += "\n\n<i>Scheduled-push marks unavailable — database read failed</i>"
     try:
         regime = await asyncio.wait_for(loop.run_in_executor(None, get_market_regime), timeout=15)
         bullish = regime.get("regime_ok", False)
@@ -3155,6 +3178,26 @@ ALGOCHECK_POLL_MIN = 10
 ALGOCHECK_CATCHUP_HOURS = 72
 ALGOCHECK_STATE_KEY = "algocheck_last_sent_week"
 
+
+def _scheduled_pushes() -> list[tuple[str, str, str]]:
+    """(label, state key, when it is due) for every push that marks a day done.
+
+    The heartbeats in /health are in-memory, so a fresh wake shows them empty and
+    they cannot answer "did this morning's briefing go out" — which, once the
+    instance started sleeping between 30-minute pings, became the question worth
+    asking. These marks are rows, so they survive the restart that clears the
+    heartbeats, and the mark is the same one the scheduler consults before
+    sending. If it is set for today, today's push is done and cannot repeat.
+    """
+    return [
+        ("US briefing", BRIEFING_STATE_KEY, "08:30 ET, weekdays"),
+        ("SGX briefing", SGX_BRIEFING_STATE_KEY, "08:30 SGT, weekdays"),
+        ("US summary", "daily_summary_last_sent_US", "07:30 SGT, Tue-Sat"),
+        ("SGX summary", "daily_summary_last_sent_SGX", "17:45 SGT, weekdays"),
+        ("Crypto recap", CRYPTO_DIGEST_STATE_KEY, "00:00/08:00/16:00 SGT"),
+        ("Weekly verdict", ALGOCHECK_STATE_KEY, "Sat 09:00 SGT"),
+    ]
+
 # Mirrors the app_state row so a healthy week costs no database round-trips.
 _algocheck_sent_tag: str | None = None
 
@@ -3406,6 +3449,38 @@ async def telegram_webhook(secret: str, request: Request):
         # /scan runs for a minute; Telegram gives up waiting long before that.
         asyncio.create_task(_run_telegram_command(text))
     return {"ok": True}
+
+
+@app.get("/api/schedules")
+async def schedules():
+    """What each scheduled push has actually completed, and when it was marked.
+
+    Deliberately not part of /health: that is the keep-warm target and must stay
+    free of database work, or a heavy scan on the free-tier CPU makes the app
+    look dead to Render.
+    """
+    try:
+        rows = db.get_state_rows()
+    except Exception as e:
+        logging.warning(f"/api/schedules read failed: {e}")
+        return {"ok": False, "error": str(e), "schedules": []}
+    now = datetime.now(SGT)
+    return {
+        "ok": True,
+        "now_sgt": now.isoformat(timespec="seconds"),
+        "schedules": [
+            {
+                "name": name,
+                "key": key,
+                "due": due,
+                # The day (or week) this push last completed for, and when that
+                # was written. A tag for today means today's push is done.
+                "last_completed": (rows.get(key) or {}).get("value"),
+                "marked_at": (rows.get(key) or {}).get("updated_at"),
+            }
+            for name, key, due in _scheduled_pushes()
+        ],
+    }
 
 
 @app.get("/api/watchlist")
