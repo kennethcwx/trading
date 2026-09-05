@@ -240,8 +240,15 @@ check("[4b] its day is recorded under its own key", r.store.get(UKEY) == "2026-0
 r = summary("US", 7, 30, (6, 0), [at("2026-09-02 09:00"), at("2026-09-02 12:00")])
 check("[4c] a restart after the target still catches up", len(r.sends) == 1)
 check("[4d] and only once", r.reads == 1)
-check("[4e] a recap 7 hours late is past the window",
-      summary("US", 7, 30, (6, 0), [at("2026-09-02 14:31")]).sends == [])
+# Was "7 hours late is past the window" until 2026-09-05, when a recap exactly
+# that late was dropped for real: nothing woke the instance inside the old
+# six-hour window, while the weekly verdict due the same morning was delivered
+# on the same late wake because it was willing to wait 72. The window now runs
+# to the next US open instead.
+check("[4e] a recap 7 hours late still arrives",
+      len(summary("US", 7, 30, (6, 0), [at("2026-09-02 14:31")]).sends) == 1)
+check("[4e2] but one past the next US open is stale and is dropped",
+      summary("US", 7, 30, (6, 0), [at("2026-09-02 21:31")]).sends == [])
 check("[4f] Monday is skipped for the US track",
       summary("US", 7, 30, (6, 0), [at("2026-09-07 07:30")],
               state={UKEY: "2026-09-05"}).sends == [])

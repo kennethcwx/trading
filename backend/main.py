@@ -3248,6 +3248,13 @@ async def _send_daily_summary(market: str, note: str = "") -> bool:
     return ok
 
 
+# How late a missed daily recap may still arrive. 14h from the 07:30 SGT US
+# summary lands at 21:30 SGT, the next US open — past that it is a recap of the
+# session before last competing with live prices. Comfortably clear of the next
+# occurrence either way, so it can never send two days' summaries for one day.
+SUMMARY_CATCHUP_HOURS = 14
+
+
 async def daily_summary_task(market: str, hour: int, minute: int, skip_weekdays: tuple):
     """Send the day summary at a fixed SGT time, skipping non-session days.
     US: 7:30 SGT Tue-Sat (session ends ~4-5 AM SGT). SGX: 17:45 SGT Mon-Fri.
@@ -3256,12 +3263,24 @@ async def daily_summary_task(market: str, hour: int, minute: int, skip_weekdays:
     persistence and no catch-up at all, so once the instance started being
     stopped every half hour the summaries simply never fired. A recap is still
     worth reading late, so the window here is generous.
+
+    Six hours was not generous enough. On 2026-09-05 nothing pinged the
+    instance between roughly 07:30 and 16:06 SGT, so the window closed at 13:30
+    unseen and that day's summary was lost outright — while the weekly verdict,
+    due the same morning with a 72-hour window, was delivered on the same wake.
+    The two differed only in how long they were willing to wait.
+
+    So the window now runs to the next US open rather than to a round number of
+    hours. That is the point where the recap stops being late news and starts
+    competing with live prices, which is the same test the morning briefing's
+    window uses (it stops at the close of the session it previews).
     """
     await _scheduled_daily(
         name=f"{market} daily summary",
         state_key=f"daily_summary_last_sent_{market}",
         market=market, tz=SGT, hour=hour, minute=minute,
-        skip_weekdays=skip_weekdays, catchup=timedelta(hours=6),
+        skip_weekdays=skip_weekdays,
+        catchup=timedelta(hours=SUMMARY_CATCHUP_HOURS),
         send=lambda note: _send_daily_summary(market, note),
     )
 

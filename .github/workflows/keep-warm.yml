@@ -1,0 +1,79 @@
+# Wakes the Render backend, but only when it has something to do.
+#
+# The instance sleeps by design: keeping it warm around the clock cost 754.92
+# hours against the free tier's 750 and suspended all three services on
+# 2026-08-30. Render stops it after 15 idle minutes, and nothing inside a
+# stopped process can restart itself — the idle timer watches inbound HTTP only.
+# So the schedules in main.py only fire if something external knocks while they
+# are due, and on 2026-09-05 nothing did for eight and a half hours: the weekly
+# verdict landed seven hours late and that morning's US summary was lost.
+#
+# The hours that matter live in backend/keepwarm_window.py, which decides in
+# real ET/SGT — GitHub's cron is fixed UTC, so a hardcoded offset would be an
+# hour wrong for half the year. The cron below is only a coarse gate: it runs
+# in every UTC hour that could contain a window in either DST state, and the
+# script says whether to actually ping.
+#
+# ⚠ GitHub's scheduled runs drift, and skip outright under load — this is the
+# same mechanism whose pings land 4-6 times out of 13 on bus-bot. The windows
+# are padded for that, and the catch-up windows in main.py are the second net.
+# It is a best-effort waker, not a guarantee.
+#
+# ⚠ GitHub disables scheduled workflows in a repo with no pushes for 60 days.
+# If the pushes stop, this stops with them.
+
+name: keep-warm
+
+on:
+  schedule:
+    # Every 10 minutes, in the UTC hours that can hold a window (EDT and EST).
+    - cron: "*/10 0,1,7,8,12,13,15,16,19,20,21,23 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keep-warm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Is anything due?
+        id: due
+        run: |
+          python backend/keepwarm_window.py > /tmp/due.txt
+          echo "ping=$(sed -n 1p /tmp/due.txt)" >> "$GITHUB_OUTPUT"
+          echo "reason=$(sed -n 2p /tmp/due.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Wake the backend
+        if: steps.due.outputs.ping == 'true'
+        env:
+          # Overridable so a fork or a moved service does not silently ping the
+          # wrong host, but defaulted so there is nothing to configure.
+          HEALTH_URL: ${{ vars.BACKEND_HEALTH_URL || 'https://trading-backend-wruf.onrender.com/health' }}
+        run: |
+          echo "Due: ${{ steps.due.outputs.reason }}"
+          # A cold start takes up to ~60s, so the timeout has to outlast one.
+          # Retried because the whole point is that the wake actually happens.
+          for attempt in 1 2 3; do
+            code=$(curl -sS -o /tmp/health.json -w '%{http_code}' \
+                     --max-time 90 "$HEALTH_URL" || echo 000)
+            echo "attempt $attempt: HTTP $code"
+            if [ "$code" = "200" ]; then
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::backend did not answer for ${{ steps.due.outputs.reason }}"
+          exit 1
+
+      - name: Nothing due
+        if: steps.due.outputs.ping != 'true'
+        run: echo "Asleep on purpose — ${{ steps.due.outputs.reason }}"
