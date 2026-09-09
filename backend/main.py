@@ -110,11 +110,63 @@ def _event_time(e: dict) -> str:
 # market watchers, a pass inside the entry-confirm window). Surfaced in /health
 # so "did the watcher run through the entry window" is answerable without
 # Render log access; /health stays zero-work (in-memory dict read).
+#
+# The dict is the read path, but it is no longer the whole story. Once the
+# instance started sleeping between windows, every wake showed it empty, so the
+# question this exists to answer — "did last night's entry scan actually run?" —
+# became unanswerable the moment the box slept, which is exactly when it matters.
+# A track with no entries then reads the same as a watcher that never ran.
+#
+# So the beats write through to app_state and are read back at startup. /health
+# keeps reading memory and stays zero-work; the row only has to survive the gap.
+_HEARTBEAT_STATE_KEY = "scan_heartbeats"
+# Whole dict per write, not a row per watcher: Neon opens a fresh connection per
+# call, so one key costs one round trip instead of seven. Safe because the
+# watchers share a single event loop — there is no concurrent writer to lose.
+_HEARTBEAT_PERSIST_SEC = 5 * 60
 _heartbeats: dict[str, str] = {}
+_heartbeats_written: datetime | None = None
+
+
+def _persist_heartbeats() -> None:
+    """Write the heartbeat dict to app_state. Never raises — a watcher must not
+    die because the database blinked, and a lost beat costs only precision."""
+    global _heartbeats_written
+    try:
+        db.set_state(_HEARTBEAT_STATE_KEY, json.dumps(_heartbeats))
+        _heartbeats_written = datetime.now(SGT)
+    except Exception as e:
+        logging.warning(f"heartbeat persist skipped: {e}")
 
 
 def _beat(name: str) -> None:
     _heartbeats[name] = datetime.now(SGT).isoformat(timespec="seconds")
+    # Throttled to the fastest watcher's own cadence: the us scan beats every
+    # 5 minutes, so this is at most ~12 writes an hour awake rather than ~42,
+    # and it costs at most 5 minutes of precision on a 30-minute entry window.
+    now = datetime.now(SGT)
+    if (_heartbeats_written is None
+            or (now - _heartbeats_written).total_seconds() >= _HEARTBEAT_PERSIST_SEC):
+        _persist_heartbeats()
+
+
+def _restore_heartbeats() -> int:
+    """Load the persisted beats back into memory at startup. Returns how many."""
+    try:
+        raw = db.get_state(_HEARTBEAT_STATE_KEY)
+        if not raw:
+            return 0
+        stored = json.loads(raw)
+        if not isinstance(stored, dict):
+            return 0
+        # Restored beats lose to anything this process has already recorded, so
+        # a startup slow enough for a watcher to beat first cannot go backwards.
+        for name, ts in stored.items():
+            _heartbeats.setdefault(name, ts)
+        return len(stored)
+    except Exception as e:
+        logging.warning(f"heartbeat restore skipped: {e}")
+        return 0
 
 
 # ── Scheduled pushes ─────────────────────────────────────────────────────────
@@ -2494,12 +2546,11 @@ async def _send_health():
         f"<code>Commit   {commit}\nUp       {_fmt_age(now - _START_TS)}</code>\n\n"
         "<b>Watcher heartbeats</b>\n"
         "<code>" + "\n".join(hb_rows) + "</code>\n"
-        "<i>— means no pass since the last restart</i>"
+        "<i>— means no pass on record</i>"
     )
-    # The heartbeats above are in-memory, so a wake shows them empty and they
-    # cannot say whether this morning's briefing went out. These marks are rows
-    # and outlive the restart; a tag for today means today's push is done and
-    # the scheduler will not send it again.
+    # The heartbeats above say a watcher ran; they cannot say a message went out.
+    # These marks are the other half — a tag for today means today's push is done
+    # and the scheduler will not send it again.
     try:
         rows = await loop.run_in_executor(None, db.get_state_rows)
         today = now.strftime("%Y-%m-%d")
@@ -3297,11 +3348,10 @@ ALGOCHECK_STATE_KEY = "algocheck_last_sent_week"
 def _scheduled_pushes() -> list[tuple[str, str, str]]:
     """(label, state key, when it is due) for every push that marks a day done.
 
-    The heartbeats in /health are in-memory, so a fresh wake shows them empty and
-    they cannot answer "did this morning's briefing go out" — which, once the
-    instance started sleeping between 30-minute pings, became the question worth
-    asking. These marks are rows, so they survive the restart that clears the
-    heartbeats, and the mark is the same one the scheduler consults before
+    The heartbeats in /health answer "did the watcher run"; they cannot answer
+    "did this morning's briefing go out" — which, once the instance started
+    sleeping between 30-minute pings, became the question worth asking. These
+    marks can, because the mark is the same one the scheduler consults before
     sending. If it is set for today, today's push is done and cannot repeat.
     """
     pushes = [
@@ -3433,6 +3483,7 @@ async def lifespan(app: FastAPI):
         logging.info(f"Restored signal state: {sum(len(d) for d in (_last_signals, _last_signals_b, _last_signals_c, _last_crypto_signals, _last_sgx_signals))} entries")
     except Exception as e:
         logging.warning(f"Could not restore signal state: {e}")
+    logging.info(f"Restored watcher heartbeats: {_restore_heartbeats()} entries")
     ibkr.connect_background(paper=True)
     watcher = asyncio.create_task(signal_watcher())
     rs_refresher = asyncio.create_task(rs_rank_refresher())
@@ -3482,6 +3533,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.warning(f"startup notice error: {e}")
     yield
+    # Flush on the way down so the last pass before a sleep is not the one lost
+    # to the throttle — Render SIGTERMs the instance before stopping it, and the
+    # final beat is the most useful one for "was it alive at the end".
+    _persist_heartbeats()
     watcher.cancel()
     crypto.cancel()
     news_task.cancel()
