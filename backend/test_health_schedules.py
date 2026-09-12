@@ -76,7 +76,7 @@ declared = {
     # Not daily pushes: one records the commit a startup notice was sent for,
     # one is the summary's event log, and one is the watcher heartbeats that
     # outlive a sleep — liveness, not a message that can be late or missing.
-    and k not in ("STARTUP_STATE_KEY", "_EVENT_LOG_STATE_KEY", "_HEARTBEAT_STATE_KEY")
+    and k not in ("STARTUP_STATE_KEY", "_EVENT_LOG_STATE_KEY", "_HEARTBEAT_STATE_KEY", "_KNOCK_STATE_KEY")
 }
 declared |= {"daily_summary_last_sent_US", "daily_summary_last_sent_SGX"}
 # SGX was shelved on 2026-09-04. Its pushes are not scheduled, so listing them would

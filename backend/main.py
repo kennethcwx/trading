@@ -169,6 +169,76 @@ def _restore_heartbeats() -> int:
         return 0
 
 
+# Who knocked, and when. The instance only wakes for an inbound request, and
+# the waking is done by an external scheduler this box cannot see into. When a
+# window is missed the first question is "did the knock arrive at all?", and
+# until now the only evidence was indirect -- a heartbeat that did not move, a
+# push marked hours late by some other window's knock. 2026-09-10 to 09-12:
+# two entry windows and a briefing missed in a row, and nothing here could say
+# whether the scheduler had stopped or the box had ignored it.
+#
+# So /health records each hit: the time and who sent it (the scheduler's
+# user-agent names itself; a browser or curl does not). A ring of the last 60
+# is about a day at the 10-minute knock cadence plus a few manual probes.
+_KNOCK_STATE_KEY = "health_knocks"
+_KNOCK_KEEP = 60
+_KNOCK_PERSIST_SEC = 60
+_knocks: list[dict] = []
+_knocks_written: datetime | None = None
+
+
+def _persist_knocks() -> None:
+    """Write the knock ring to app_state. Never raises, same as the beats."""
+    global _knocks_written
+    try:
+        db.set_state(_KNOCK_STATE_KEY, json.dumps(_knocks))
+        _knocks_written = datetime.now(SGT)
+    except Exception as e:
+        logging.warning(f"knock persist skipped: {e}")
+
+
+def _knock(agent: str) -> None:
+    """Record one /health hit in memory; the write happens elsewhere.
+
+    /health must stay zero-work on the request path -- it is what Render and
+    the scheduler judge the instance by -- so the row is written from a thread,
+    and at most once a minute so a burst of probes is one write, not ten.
+    """
+    global _knocks_written
+    _knocks.append({"t": datetime.now(SGT).isoformat(timespec="seconds"),
+                    "ua": (agent or "")[:48]})
+    del _knocks[:-_KNOCK_KEEP]
+    now = datetime.now(SGT)
+    if (_knocks_written is None
+            or (now - _knocks_written).total_seconds() >= _KNOCK_PERSIST_SEC):
+        # Stamped before the thread runs, so a second hit inside the same
+        # minute does not queue a second write.
+        _knocks_written = now
+        try:
+            asyncio.get_running_loop().run_in_executor(None, _persist_knocks)
+        except RuntimeError:
+            _persist_knocks()   # no loop (tests): write inline
+
+
+def _restore_knocks() -> int:
+    """Load the persisted knocks back at startup, oldest first. Returns how many."""
+    try:
+        raw = db.get_state(_KNOCK_STATE_KEY)
+        if not raw:
+            return 0
+        stored = json.loads(raw)
+        if not isinstance(stored, list):
+            return 0
+        stored = [k for k in stored if isinstance(k, dict) and "t" in k]
+        # Anything this process already saw is newer than anything stored.
+        _knocks[:0] = stored
+        del _knocks[:-_KNOCK_KEEP]
+        return len(stored)
+    except Exception as e:
+        logging.warning(f"knock restore skipped: {e}")
+        return 0
+
+
 # ── Scheduled pushes ─────────────────────────────────────────────────────────
 # The daily jobs below follow weekly_algocheck_task's shape — poll, ask the
 # database whether this occurrence already went out, never hold a schedule
@@ -3484,6 +3554,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.warning(f"Could not restore signal state: {e}")
     logging.info(f"Restored watcher heartbeats: {_restore_heartbeats()} entries")
+    logging.info(f"Restored /health knocks: {_restore_knocks()} entries")
     ibkr.connect_background(paper=True)
     watcher = asyncio.create_task(signal_watcher())
     rs_refresher = asyncio.create_task(rs_rank_refresher())
@@ -3537,6 +3608,7 @@ async def lifespan(app: FastAPI):
     # to the throttle — Render SIGTERMs the instance before stopping it, and the
     # final beat is the most useful one for "was it alive at the end".
     _persist_heartbeats()
+    _persist_knocks()
     watcher.cancel()
     crypto.cancel()
     news_task.cancel()
@@ -3652,6 +3724,9 @@ async def schedules():
     return {
         "ok": True,
         "now_sgt": now.isoformat(timespec="seconds"),
+        # The full knock ring, so a missed window can be read against the
+        # knocks that should have preceded it. /health carries only the tail.
+        "knocks": list(_knocks),
         "schedules": [
             {
                 "name": name,
@@ -3712,13 +3787,15 @@ async def news_feed():
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
-async def health():
+async def health(request: Request):
     # Keep-warm/health-check target: must do zero work (no DB, no IBKR)
     # so heavy watcher scans on the tiny free-tier CPU never make the
     # app look dead to Render or UptimeRobot. Accepts HEAD because
-    # UptimeRobot pings with HEAD by default.
+    # UptimeRobot pings with HEAD by default. The knock is noted in memory
+    # and written from a thread -- see _knock().
+    _knock(request.headers.get("user-agent", ""))
     return {"ok": True, "commit": os.getenv("RENDER_GIT_COMMIT", "")[:7], "scans": _heartbeats,
-            "send_failures": _send_failures[-5:]}
+            "send_failures": _send_failures[-5:], "knocks": _knocks[-10:]}
 
 
 @app.get("/api/status")
