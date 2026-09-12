@@ -24,3 +24,5 @@ research/
 # Agent tooling
 .agents/
 skills-lock.json
+
+.vercel
