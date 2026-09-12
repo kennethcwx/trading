@@ -17,6 +17,7 @@ Negative controls:
   - make _restore_knocks() replace the list instead of prepending and [6] must fail
     (only if a hit lands before startup restore; the order in [6] is the real one)
   - make _persist_knocks() re-raise and [8] must fail
+  - drop the Render/ filter in _knock() and [16] must fail
 """
 import asyncio
 import datetime as _dt
@@ -167,6 +168,17 @@ try:
     del store[main._KNOCK_STATE_KEY]
     main._knocks.clear()
     check("[14] a first-ever boot with no row restores nothing", main._restore_knocks() == 0)
+
+    # ── Render's own 5-second health check is not a knock ────────────────────
+    main._knocks.clear()
+    main._knocks_written = None
+    writes.clear()
+    _Clock._t = _dt.datetime(2026, 9, 13, 3, 0, 0, tzinfo=SGT)
+    for i in range(12):
+        main._knock("Render/1.0")
+    check("[16] Render/1.0 is neither recorded nor written", not main._knocks and not writes)
+    main._knock(CRON_UA)
+    check("[17] a real knock after the checks is the only entry", len(main._knocks) == 1)
 
     # ── The guard in test_health_schedules must know this key ────────────────
     src = open("backend/test_health_schedules.py", encoding="utf-8").read()

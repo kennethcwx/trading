@@ -205,6 +205,12 @@ def _knock(agent: str) -> None:
     and at most once a minute so a burst of probes is one write, not ten.
     """
     global _knocks_written
+    # Render's own health check hits this every 5 seconds while the box is up
+    # (agent "Render/1.0"). It comes from inside Render and cannot wake a
+    # sleeping instance, so it is not a knock -- and unfiltered it fills the
+    # ring in five minutes and pushes out the ones that are.
+    if (agent or "").startswith("Render/"):
+        return
     _knocks.append({"t": datetime.now(SGT).isoformat(timespec="seconds"),
                     "ua": (agent or "")[:48]})
     del _knocks[:-_KNOCK_KEEP]
