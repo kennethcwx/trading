@@ -392,6 +392,41 @@ check("/help lists it, or he will never know it exists",
 check("Telegram's own command menu carries it too",
       '"command": "shadow"' in inspect.getsource(telegram_bot.set_bot_commands))
 
+print("\n[9] divergence alert -- shadow enters, live did not")
+div = row_of(78335.19, 86.0, 73369.80, 3.42)
+div["action"], div["signal"] = "SKIP", {"action": "SKIP", "reasons": ["RSI 86 > 70"]}
+with_bot(lambda: with_fake(lambda f: main._run_crypto_track([div], REGIME, 0.7866)))
+check("one push when the shadow opens what live skipped", len(SENT) == 1)
+check("it names the coin and says live skipped",
+      bool(SENT) and "Shadow BUY BTC" in SENT[0] and "live skipped" in SENT[0])
+check("and carries live's reason", bool(SENT) and "RSI 86 > 70" in SENT[0])
+check("and points at /shadow", bool(SENT) and "/shadow" in SENT[0])
+
+agree = row_of(100.0, 30.0, 120.0, 0.8)
+agree["action"] = "BUY"
+with_bot(lambda: with_fake(lambda f: main._run_crypto_track([agree], REGIME, 0.7866)))
+check("no push when live also bought -- that already alerted as a live BUY",
+      len(SENT) == 0)
+
+with_bot(lambda: with_fake(lambda f: main._run_crypto_track(
+    [row_of(100.0, 85.0, 130.0, 3.0)], REGIME, 0.7866)))
+check("no push when the shadow itself did not enter", len(SENT) == 0)
+
+
+def _boom(m, **k):
+    raise RuntimeError("telegram down")
+
+
+_real_send = telegram_bot.send
+telegram_bot.send = _boom
+try:
+    fk, out = with_fake(lambda f: main._run_crypto_track([div], REGIME, 0.7866))
+finally:
+    telegram_bot.send = _real_send
+check("a failed send never loses the paper row or the pass",
+      len(fk.paper) == 1 and out is not None)
+
+
 print(f"\n{'=' * 60}\n  {passed} passed, {len(failed)} failed")
 if failed:
     for f in failed:

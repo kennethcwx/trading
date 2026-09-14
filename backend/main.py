@@ -1158,6 +1158,25 @@ def _crypto_shadow_summary() -> dict | None:
     }
 
 
+def _alert_shadow_divergence(symbol, qty, price, stop, row, sig) -> None:
+    """Telegram push when the shadow enters and live does not. Never raises."""
+    live = row.get("signal") or {}
+    live_why = "; ".join(live.get("reasons") or []) or (live.get("action") or "no signal")
+    coin = symbol.replace("-USD", "")
+    msg = "\n".join([
+        f"👻 <b>Shadow BUY {coin} — live skipped</b>",
+        f"{CRYPTO_SHADOW_VARIANT} @ ${price:,.2f} · stop ${stop:,.2f} · qty {qty}",
+        f"Shadow: {'; '.join(sig.get('reasons') or [])[:300]}",
+        f"Live ({live.get('action') or '—'}): {live_why[:300]}",
+        "<i>Paper only. /shadow for the track.</i>",
+    ])
+    try:
+        if not telegram_bot.send(msg):
+            logging.warning(f"crypto shadow: divergence alert for {symbol} not sent")
+    except Exception as e:
+        logging.warning(f"crypto shadow: divergence alert failed for {symbol}: {e}")
+
+
 def _run_crypto_track(rows: list[dict], regime: dict, sgd_to_usd: float) -> dict | None:
     """Auto-fill the crypto shadow track (NO_RSI_CAP) beside the live BASELINE rule.
 
@@ -1172,7 +1191,8 @@ def _run_crypto_track(rows: list[dict], regime: dict, sgd_to_usd: float) -> dict
     entry change under review -- and de-arming was measured on US data and is
     right there, wrong here (see the trail note in the live alert path).
 
-    Silent by design: it logs and returns counts for the pulse line, never sends.
+    Sends exactly one kind of message: a divergence alert when it enters and
+    the live rule did not (2026-09-14, his ask). Exits stay silent.
     """
     if not CRYPTO_SHADOW_ENABLED:
         return None
@@ -1238,6 +1258,11 @@ def _run_crypto_track(rows: list[dict], regime: dict, sgd_to_usd: float) -> dict
                 )
             except Exception as e:
                 logging.warning(f"crypto shadow: open failed for {symbol}: {e}")
+                continue
+            # 2026-09-14: the one push this track makes -- an entry the live
+            # rule refused. Agreeing entries already alerted above as live BUYs.
+            if r.get("action") != "BUY":
+                _alert_shadow_divergence(symbol, qty, price, stop, r, sig)
             continue
 
         # -- Exits ----------------------------------------------------------
