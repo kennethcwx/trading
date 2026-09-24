@@ -4385,6 +4385,18 @@ async def get_gated_signals():
     }
 
 
+@app.get("/api/shadow")
+async def get_crypto_shadow():
+    """The crypto shadow track without Telegram: the /shadow counts plus every
+    leg. Unpriced on purpose, like /api/gated-signals -- open legs show entry
+    and stop only; /shadow in Telegram is the one that fetches live prices."""
+    return {
+        "enabled": CRYPTO_SHADOW_ENABLED,
+        "summary": _crypto_shadow_summary(),
+        "trades": [dict(r) for r in db.get_all_paper_trades(CRYPTO_SHADOW_TRACK)],
+    }
+
+
 @app.get("/api/sgx-fills")
 async def get_sgx_fills():
     """Every SGX order alert, reported or not — the signal-vs-fill record.
